@@ -14,14 +14,25 @@ import UniformTypeIdentifiers
 public enum CropCapture {
 
     /// Capture `selection` and write it as a JPEG at `url`.
-    ///
-    /// Safe to call from any thread: it shells out and decodes, and touches no
-    /// AppKit state beyond reading the screen's frame off the selection.
     @discardableResult
     public static func capture(_ selection: CropSelectionOverlay.Selection,
                                to url: URL,
                                quality: CGFloat = 0.85) -> Bool {
-        let display = displayNumber(for: selection.screen)
+        capture(selection.rect, on: selection.screen, to: url, quality: quality)
+    }
+
+    /// The same, for a caller that has the rectangle without having been the one
+    /// to put the overlay up — a crop replayed from a log, or a region chosen
+    /// some other way.
+    ///
+    /// Safe to call from any thread: it shells out and decodes, and touches no
+    /// AppKit state beyond reading the screen's frame.
+    @discardableResult
+    public static func capture(_ rect: NSRect,
+                               on screen: NSScreen,
+                               to url: URL,
+                               quality: CGFloat = 0.85) -> Bool {
+        let display = displayNumber(for: screen)
         let temp = FileManager.default.temporaryDirectory
             .appendingPathComponent("victor-crop-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: temp) }
@@ -39,8 +50,8 @@ public enum CropCapture {
         guard let source = CGImageSourceCreateWithURL(temp as CFURL, nil),
               let full = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return false }
 
-        let crop = CropGeometry.pixelCrop(of: selection.rect,
-                                          onScreen: selection.screen.frame,
+        let crop = CropGeometry.pixelCrop(of: rect,
+                                          onScreen: screen.frame,
                                           imageWidth: CGFloat(full.width))
         guard let cropped = full.cropping(to: crop) else { return false }
 

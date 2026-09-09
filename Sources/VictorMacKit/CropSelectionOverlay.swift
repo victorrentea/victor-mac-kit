@@ -85,6 +85,33 @@ public final class CropSelectionOverlay {
 
     private static var active: CropSelectionOverlay?
 
+    /// **A release the poll cannot see, because an event tap upstream ate it.**
+    ///
+    /// Measured the first time Walkie Talkie drove this with the wheel: it
+    /// swallows the middle-up so the app underneath is not handed the end of a
+    /// gesture it never saw the middle of — and a swallowed release **never
+    /// reaches session button state**, so `buttonState` went on answering *down*
+    /// after the finger came up and the dimming sat on the screen with no way
+    /// out but Esc. The button is the app's own to report in that case, and it
+    /// is the only one that can.
+    ///
+    /// A release that lands before the overlay is up is kept for `begin`, since
+    /// the two arrive by different routes and a quick flick beats the panels on
+    /// screen. It is only honoured for `pendingReleaseWindow` — long enough for
+    /// the hop, short enough that a stale one cannot end the *next* selection
+    /// before it starts.
+    private static var pendingReleaseAt: CFAbsoluteTime = 0
+    private static let pendingReleaseWindow: CFTimeInterval = 0.5
+
+    /// Must be called on the main thread.
+    public static func endDrag() {
+        if let overlay = active {
+            overlay.released = true
+        } else {
+            pendingReleaseAt = CFAbsoluteTimeGetCurrent()
+        }
+    }
+
     /// Put the crosshair up. `completion` runs on the main thread, **after** the
     /// overlay is off the screen and the window server has had time to forget
     /// it — the capture that follows must not photograph our own dimming.
@@ -101,6 +128,8 @@ public final class CropSelectionOverlay {
                              completion: @escaping (Selection?) -> Void) {
         if active != nil { completion(nil); return }
         let overlay = CropSelectionOverlay(button: button, style: style, completion: completion)
+        overlay.released = CFAbsoluteTimeGetCurrent() - pendingReleaseAt < pendingReleaseWindow
+        pendingReleaseAt = 0
         active = overlay
         overlay.show(startingAt: anchor)
     }
@@ -119,6 +148,8 @@ public final class CropSelectionOverlay {
     /// follow the cursor; then it carries exactly how far behind it fell.
     private var freeOffset: CGVector = .zero
     private var dragging = false
+    /// The driving button is up, told to us rather than read — see `endDrag`.
+    private var released = false
     private var startScreen: NSScreen?
     /// Set on the ⌘ press, cleared on the release: where the mouse and the box
     /// were when the move began, so the translation is always measured from
@@ -197,7 +228,7 @@ public final class CropSelectionOverlay {
 
     private func tick() {
         let mouse = NSEvent.mouseLocation
-        let held = CGEventSource.buttonState(.combinedSessionState, button: button.cg)
+        let held = !released && CGEventSource.buttonState(.combinedSessionState, button: button.cg)
         // The right button is the cancel, so it cannot also be the one being
         // dragged with — no caller asks for that, and this is where it would
         // otherwise cancel itself on its own press.
