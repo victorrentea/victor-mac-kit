@@ -12,6 +12,15 @@ Today that is one gesture: **dragging out a region of the screen**.
 | `CropSelectionOverlay` | the dimming, the rectangle, the size readout. One panel per screen, driven by a 60 Hz poll of session input state rather than by AppKit events, so it needs no key window and steals no focus from the room. |
 | `CropCapture` | the chosen rectangle → a JPEG, by capturing the whole display and cropping at the display's real pixel scale. |
 
+## The readout
+
+`386 × 232   ⌘ move   ⌥ centre` under the box: the size, then both keys, each dim
+until its modifier is held and lit in the accent while it is. They were appended
+only while the key was down, which made them a readout of something you already
+know you are doing; as a permanent pair they are the legend for the two keys the
+gesture has, in the one place you are already looking, and the colour becomes the
+readout instead.
+
 ## Why the two apps disagree about so little
 
 `CropSelectionStyle` is the whole surface of it: the accent colour and three

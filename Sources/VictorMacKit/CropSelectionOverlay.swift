@@ -57,15 +57,29 @@ public struct CropSelectionStyle {
     public var accent: NSColor
     /// Shown before the drag begins, in the flavour that waits for one.
     public var hint: String
-    /// Appended to the size readout while ⌘ moves the box.
+    /// **Always beside the size, and lit only while it is happening.** Victor,
+    /// 2026-09-10: *"legenda «centre» și «move» să fie mereu prezentă când fac
+    /// crop, dar să devină colorate cuvintele când chiar se întâmplă."*
+    ///
+    /// They were appended only while the modifier was down, which made them a
+    /// *readout* — and a readout of a thing you already know you are doing, on
+    /// the one row you look at while framing. As a permanent pair they are the
+    /// legend for the two keys this gesture has, in the one place he is already
+    /// looking, and the colour is then the readout: the word he is using goes
+    /// from dim to the accent, so *nothing* is what the box is doing plainly.
+    ///
+    /// They name the **key**, not the effect, for the same reason: `⌘ move` on
+    /// screen the whole time is how ⌘ gets learned, where `✥ move` — what these
+    /// said while they were a readout — is a symbol for something he can see
+    /// happening anyway.
     public var movingSuffix: String
-    /// Appended to the size readout while ⌥ draws it from its middle.
+    /// The other half of that pair; see `movingSuffix`.
     public var centeredSuffix: String
 
     public init(accent: NSColor = .systemYellow,
                 hint: String = "drag an area  ·  ⌘ move  ·  ⌥ from centre  ·  Esc cancels",
-                movingSuffix: String = "✥ move",
-                centeredSuffix: String = "⦿ centre") {
+                movingSuffix: String = "⌘ move",
+                centeredSuffix: String = "⌥ centre") {
         self.accent = accent
         self.hint = hint
         self.movingSuffix = movingSuffix
@@ -508,11 +522,8 @@ private final class CropOverlayView: NSView {
             vGuide.isHidden = true
             hGuide.isHidden = true
             hint.layer.isHidden = true
-            var suffix = ""
-            if centered { suffix += "   " + style.centeredSuffix }
-            if moving { suffix += "   " + style.movingSuffix }
             place(sizeLabel,
-                  text: "\(Int(size.width)) × \(Int(size.height))\(suffix)",
+                  text: readout(size: size, moving: moving, centered: centered),
                   near: selection)
         } else {
             border.isHidden = true
@@ -527,14 +538,38 @@ private final class CropOverlayView: NSView {
             // The hold is the one gesture nothing on screen reveals; ⌘ and ⌥
             // are the others. Say them once, while there is still nothing else
             // to read.
-            place(hint, text: style.hint, near: nil, cursor: cursor)
+            place(hint, text: NSAttributedString(
+                    string: style.hint,
+                    attributes: [.font: Self.hintFont, .foregroundColor: NSColor.white]),
+                  near: nil, cursor: cursor)
         }
+    }
+
+    /// `500 × 320   ⌘ move   ⌥ centre` — the size, then both keys, each lit
+    /// only while it is being held.
+    private func readout(size: CGSize, moving: Bool, centered: Bool) -> NSAttributedString {
+        let font = Self.labelFont
+        let out = NSMutableAttributedString(
+            string: "\(Int(size.width)) × \(Int(size.height))",
+            attributes: [.font: font, .foregroundColor: NSColor.white])
+        func legend(_ text: String, _ lit: Bool) {
+            out.append(NSAttributedString(
+                string: "   " + text,
+                attributes: [.font: font,
+                             // Dim rather than hidden: it is a legend the rest of
+                             // the time, and a word that appears only once you are
+                             // already doing the thing teaches nobody.
+                             .foregroundColor: lit ? style.accent : NSColor(white: 1, alpha: 0.45)]))
+        }
+        legend(style.movingSuffix, moving)
+        legend(style.centeredSuffix, centered)
+        return out
     }
 
     /// The readout sits just under the selection, flipping above it when the box
     /// is against the bottom of the screen — never inside it, where it would be
     /// captured.
-    private func place(_ pill: PillLabel, text: String, near rect: NSRect?, cursor: NSPoint = .zero) {
+    private func place(_ pill: PillLabel, text: NSAttributedString, near rect: NSRect?, cursor: NSPoint = .zero) {
         let size = pill.setText(text)
         var x: CGFloat
         var y: CGFloat
@@ -578,11 +613,17 @@ private final class PillLabel {
     }
 
     /// Sets the string and answers the pill size the caller has to place.
+    ///
+    /// **Attributed, since the readout carries two words in two colours.** A
+    /// `CATextLayer` takes one happily; what it will not do is let a
+    /// `foregroundColor` set on the layer win against the runs, which is the
+    /// same trap `RelayWindow.applySelectionText` is written under in Walkie
+    /// Talkie — so the colour lives in the string and nowhere else.
     @discardableResult
-    func setText(_ string: String) -> CGSize {
+    func setText(_ string: NSAttributedString) -> CGSize {
         layer.isHidden = false
         text.string = string
-        let measured = (string as NSString).size(withAttributes: [.font: font])
+        let measured = string.size()
         let size = CGSize(width: measured.width + Self.padding.width * 2,
                           height: measured.height + Self.padding.height * 2)
         text.frame = CGRect(x: 0, y: Self.padding.height,
