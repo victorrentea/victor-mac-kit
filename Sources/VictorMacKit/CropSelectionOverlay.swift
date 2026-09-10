@@ -85,6 +85,10 @@ public final class CropSelectionOverlay {
 
     private static var active: CropSelectionOverlay?
 
+    /// Where this module's one diagnostic line goes. Each app points it at its
+    /// own log; unset, nothing is written.
+    public static var log: ((String) -> Void)?
+
     /// **A release the poll cannot see, because an event tap upstream ate it.**
     ///
     /// Measured the first time Walkie Talkie drove this with the wheel: it
@@ -102,6 +106,36 @@ public final class CropSelectionOverlay {
     /// before it starts.
     private static var pendingReleaseAt: CFAbsoluteTime = 0
     private static let pendingReleaseWindow: CFTimeInterval = 0.5
+
+    /// **The pointer moved, pushed by the caller that is eating the events.**
+    ///
+    /// A `driven` drag has every one of its motion events swallowed by an event
+    /// tap before any window sees them, and the 60 Hz poll that works for a
+    /// left-button drag then turns out to be the weak link: it is a *timer* on
+    /// the main run loop, and a box that stops following the hand while the
+    /// button is held is exactly what a starved timer looks like. Reported by
+    /// Victor on the first real drag — *"nu văd live chenarul selectat în timp
+    /// ce țin jos wheel-ul, văd doar un chenar mic inițial și apoi, când dau
+    /// release, cel final"* — and not reproducible with posted events, which is
+    /// the tell: the caller is holding the answer in its hand and was throwing
+    /// it away.
+    ///
+    /// So the position comes *in* rather than being fetched, and it draws on
+    /// arrival. The timer stays for what only it can see — Esc, the right
+    /// button, ⌘ and ⌥ — and the box no longer depends on it being given a turn.
+    ///
+    /// The point is in **global CG** coordinates, y down from the primary
+    /// display's top, because that is what an event carries; the flip happens
+    /// here, once, where a screen can safely be asked about.
+    ///
+    /// Must be called on the main thread.
+    public static func dragMoved(toCG point: CGPoint) {
+        guard let overlay = active, overlay.driven else { return }
+        guard let primary = NSScreen.screens.first else { return }
+        overlay.pushed = NSPoint(x: point.x, y: primary.frame.maxY - point.y)
+        overlay.pushes += 1
+        overlay.tick()
+    }
 
     /// Must be called on the main thread.
     public static func endDrag() {
@@ -151,6 +185,11 @@ public final class CropSelectionOverlay {
     private var dragging = false
     /// The driving button is up, told to us rather than read — see `endDrag`.
     private var released = false
+    /// Where the caller last saw the pointer — see `dragMoved(toCG:)`. Preferred
+    /// over `NSEvent.mouseLocation` whenever it is there, because it is the
+    /// position the event was *made* at rather than wherever the pointer has
+    /// since got to.
+    private var pushed: NSPoint?
     /// **The drag was handed in, so the button is the caller's to report.**
     ///
     /// A caller that owns the gesture through an event tap has, by then, already
@@ -175,6 +214,14 @@ public final class CropSelectionOverlay {
     /// what the box *is*, so toggling it mid-move restarts the measurement.
     private var moveOrigin: (mouse: NSPoint, anchor: NSPoint, free: NSPoint, box: NSRect, centered: Bool)?
     private var finished = false
+    /// How the box was kept up to date, reported once when the selection ends.
+    /// The question it answers is the one that took a bug report to ask: *was
+    /// the box actually being redrawn while the button was down?*
+    private var startedAt = Date()
+    private var ticks = 0
+    private var pushes = 0
+    private var worstGap: TimeInterval = 0
+    private var lastTick = Date()
 
     private init(button: CropDragButton, driven: Bool, style: CropSelectionStyle,
                  completion: @escaping (Selection?) -> Void) {
@@ -198,11 +245,15 @@ public final class CropSelectionOverlay {
             // Accepting the mouse is the whole point of the window: the clicks
             // of the drag must land here and nowhere else.
             panel.ignoresMouseEvents = false
-            // The capture that follows is a picture of this very screen, and the
-            // panels are ordered out a beat before it is taken — but a beat is a
-            // promise about scheduling, and this is a promise about the window
-            // server. Belt and braces, and free.
-            panel.sharingType = .none
+            // **Deliberately capturable**, unlike everything Walkie Talkie draws
+            // near the pointer. It was `sharingType = .none` for an afternoon,
+            // as belt and braces over the beat that already separates the panels
+            // coming down from the shutter — and the price of those braces is
+            // that the selection cannot be *reviewed*: not by a screenshot, not
+            // by a person driving the Mac remotely, not by anything but a pair
+            // of eyes on the glass at the moment it happens. That is exactly how
+            // a box that stopped following the mouse went unnoticed. The beat is
+            // what keeps the dimming out of the picture and always was.
             panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)))
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
 
@@ -229,6 +280,10 @@ public final class CropSelectionOverlay {
     private func finish(_ selection: Selection?) {
         guard !finished else { return }
         finished = true
+        let seconds = Date().timeIntervalSince(startedAt)
+        CropSelectionOverlay.log?(String(
+            format: "✂️ selection over %.1fs — %d frames (%d pushed, %d polled), worst gap %.0fms",
+            seconds, ticks, pushes, ticks - pushes, worstGap * 1000))
         timer?.invalidate()
         timer = nil
         for entry in panels { entry.panel.orderOut(nil) }
@@ -246,7 +301,11 @@ public final class CropSelectionOverlay {
     // MARK: - The loop
 
     private func tick() {
-        let mouse = NSEvent.mouseLocation
+        let now = Date()
+        ticks += 1
+        worstGap = max(worstGap, now.timeIntervalSince(lastTick))
+        lastTick = now
+        let mouse = pushed ?? NSEvent.mouseLocation
         let held = !released
             && (driven || CGEventSource.buttonState(.combinedSessionState, button: button.cg))
         // The right button cancels, and it is never the one being dragged with —
