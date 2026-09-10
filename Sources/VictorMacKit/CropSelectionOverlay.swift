@@ -127,7 +127,8 @@ public final class CropSelectionOverlay {
                              style: CropSelectionStyle = CropSelectionStyle(),
                              completion: @escaping (Selection?) -> Void) {
         if active != nil { completion(nil); return }
-        let overlay = CropSelectionOverlay(button: button, style: style, completion: completion)
+        let overlay = CropSelectionOverlay(button: button, driven: anchor != nil,
+                                           style: style, completion: completion)
         overlay.released = CFAbsoluteTimeGetCurrent() - pendingReleaseAt < pendingReleaseWindow
         pendingReleaseAt = 0
         active = overlay
@@ -150,6 +151,23 @@ public final class CropSelectionOverlay {
     private var dragging = false
     /// The driving button is up, told to us rather than read — see `endDrag`.
     private var released = false
+    /// **The drag was handed in, so the button is the caller's to report.**
+    ///
+    /// A caller that owns the gesture through an event tap has, by then, already
+    /// decided the button's fate — and either decision makes session button
+    /// state the wrong thing to poll. Swallow the press and the state never says
+    /// *down*, so the very first tick would end a selection that has not started;
+    /// swallow the release and it never says *up*, so it never ends at all.
+    /// Measured on Walkie Talkie's wheel drag, which does one of those in each of
+    /// its two gesture modes: the first tick ended the selection instantly in
+    /// one, and in the other the dimming stayed up with the finger long since
+    /// lifted — and the window server went on believing the middle button was
+    /// held, seven hours later, dragging an editor tab around behind the cursor.
+    ///
+    /// So in this mode the button is *not read at all*. `endDrag` is the whole
+    /// of it, with Esc and the right button still there as the ways out that do
+    /// not depend on the caller being alive.
+    private let driven: Bool
     private var startScreen: NSScreen?
     /// Set on the ⌘ press, cleared on the release: where the mouse and the box
     /// were when the move began, so the translation is always measured from
@@ -158,9 +176,10 @@ public final class CropSelectionOverlay {
     private var moveOrigin: (mouse: NSPoint, anchor: NSPoint, free: NSPoint, box: NSRect, centered: Bool)?
     private var finished = false
 
-    private init(button: CropDragButton, style: CropSelectionStyle,
+    private init(button: CropDragButton, driven: Bool, style: CropSelectionStyle,
                  completion: @escaping (Selection?) -> Void) {
         self.button = button
+        self.driven = driven
         self.style = style
         self.completion = completion
     }
@@ -228,11 +247,12 @@ public final class CropSelectionOverlay {
 
     private func tick() {
         let mouse = NSEvent.mouseLocation
-        let held = !released && CGEventSource.buttonState(.combinedSessionState, button: button.cg)
-        // The right button is the cancel, so it cannot also be the one being
-        // dragged with — no caller asks for that, and this is where it would
-        // otherwise cancel itself on its own press.
-        let rightDown = button != .middle && CGEventSource.buttonState(.combinedSessionState, button: .right)
+        let held = !released
+            && (driven || CGEventSource.buttonState(.combinedSessionState, button: button.cg))
+        // The right button cancels, and it is never the one being dragged with —
+        // no caller asks for that, and it is the escape hatch that works even if
+        // the caller driving the button has stopped answering.
+        let rightDown = CGEventSource.buttonState(.combinedSessionState, button: .right)
         let escape = CGEventSource.keyState(.combinedSessionState, key: 53)
 
         // Esc and right-click both mean "never mind": no file, clipboard and

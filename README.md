@@ -20,10 +20,20 @@ English-only, because its chip is on a projector in front of an international
 room. Nothing else is per-app.
 
 `begin(button:from:)` is the other difference and it is about *how the gesture
-starts*. Victor Addons holds ⌃P, lets go, and then draws a box with the left
+starts* — and about who owns the button. Victor Addons holds ⌃P, lets go, and then draws a box with the left
 button. Walkie Talkie has a drag under way already — the wheel is down and the
 hand is moving — so it hands in the corner it started from and the box is live
 on the first frame.
+
+A drag handed in that way is **`driven`**, and the overlay then stops polling
+session button state for the release. It has to: a caller that owns the gesture
+through an event tap has already decided the button's fate, and either decision
+makes that poll wrong. Swallow the press and the state never says *down*, so the
+first tick ends a selection that has not started; swallow the release and it
+never says *up*, so the selection never ends and the window server goes on
+believing the button is held — measured at seven hours, with an editor tab stuck
+to the cursor. `endDrag()` is the report; Esc and the right button stay as the
+ways out that do not need the caller to be alive.
 
 ## It is a path dependency, on purpose
 
