@@ -50,9 +50,11 @@ public enum CropDragButton {
 /// is the same gesture in both, deliberately: Victor makes it in both apps,
 /// minutes apart, in the same workshop.
 ///
-/// The hint is a parameter and not a constant because Victor Addons speaks
-/// Romanian on screen and Walkie Talkie's overlay is English-only — its chip
-/// is on a projector in front of an international room.
+/// The hint is a parameter and not a constant so an app can reword the legend,
+/// but both callers take the English defaults below since 2026-09-16: Victor
+/// Addons used to override them in Romanian, and one gesture reading
+/// differently in the two apps — minutes apart, in the same workshop — was
+/// worth more than the translation.
 public struct CropSelectionStyle {
     public var accent: NSColor
     /// Shown before the drag begins, in the flavour that waits for one.
