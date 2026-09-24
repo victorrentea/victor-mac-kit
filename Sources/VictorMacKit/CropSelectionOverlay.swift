@@ -77,15 +77,25 @@ public struct CropSelectionStyle {
     public var movingSuffix: String
     /// The other half of that pair; see `movingSuffix`.
     public var centeredSuffix: String
+    /// **⇧ mid-drag: *this, moved to there*** (2026-09-24, Walkie Talkie only).
+    /// Off by default, so an app that never asked for it keeps ⇧ meaning
+    /// nothing. See `CropSelectionOverlay.Selection.movedTo`.
+    public var allowsMove: Bool
+    /// The legend word for ⇧, lit while a destination is being drawn.
+    public var moveToSuffix: String
 
     public init(accent: NSColor = .systemYellow,
                 hint: String = "drag an area  ·  ⌘ move  ·  ⌥ from centre  ·  Esc cancels",
                 movingSuffix: String = "⌘ move",
-                centeredSuffix: String = "⌥ centre") {
+                centeredSuffix: String = "⌥ centre",
+                allowsMove: Bool = false,
+                moveToSuffix: String = "⇧ move to") {
         self.accent = accent
         self.hint = hint
         self.movingSuffix = movingSuffix
         self.centeredSuffix = centeredSuffix
+        self.allowsMove = allowsMove
+        self.moveToSuffix = moveToSuffix
     }
 }
 
@@ -94,6 +104,18 @@ public final class CropSelectionOverlay {
         /// Global Cocoa coordinates, whole points, entirely within `screen`.
         public let rect: NSRect
         public let screen: NSScreen
+        /// **Where the thing in `rect` should go** — set only when the drag
+        /// ended with ⇧ held and a second box drawn (`allowsMove`). Victor,
+        /// 2026-09-24: *"the old shape will remain there, locked … and then an
+        /// arrow should lay from the center of it to wherever the new shape
+        /// that I'm moving right now is."* Same coordinates as `rect`.
+        public let movedTo: NSRect?
+
+        public init(rect: NSRect, screen: NSScreen, movedTo: NSRect? = nil) {
+            self.rect = rect
+            self.screen = screen
+            self.movedTo = movedTo
+        }
     }
 
     /// Nothing smaller than this is a selection — it is a click that slipped.
@@ -229,6 +251,13 @@ public final class CropSelectionOverlay {
     /// there rather than accumulated. `centered` is remembered too — ⌥ changes
     /// what the box *is*, so toggling it mid-move restarts the measurement.
     private var moveOrigin: (mouse: NSPoint, anchor: NSPoint, free: NSPoint, box: NSRect, centered: Bool)?
+    /// **The box locked by ⇧, and how to give it back.** While ⇧ is held the
+    /// first box stands still as the *source* and a second one is drawn from
+    /// the pointer, corner to corner like the first (⌘ and ⌥ act on it).
+    /// Letting ⇧ go drops the second box and hands the first one back to the
+    /// hand, exactly the shape it was — *"if I release Shift then the whole
+    /// thing falls back to the previous shape"*.
+    private var moveSource: (box: NSRect, anchor: NSPoint, free: NSPoint)?
     private var finished = false
     /// How the box was kept up to date, reported once when the selection ends.
     /// The question it answers is the one that took a bug report to ask: *was
@@ -350,6 +379,22 @@ public final class CropSelectionOverlay {
         // becomes the *middle* of the box, with the mouse still on a corner.
         let centered = flags.contains(.option)
 
+        // ⇧ held: lock the box as the source and start a destination at the
+        // pointer. Released: back to the source, as it was.
+        let shifted = style.allowsMove && flags.contains(.shift)
+        if shifted, moveSource == nil {
+            moveSource = (box: currentRect(for: mouse, centered: centered),
+                          anchor: anchor, free: freeCorner(for: mouse))
+            anchor = CropGeometry.clamped(mouse, within: bounds)
+            freeOffset = .zero
+            moveOrigin = nil
+        } else if !shifted, let source = moveSource {
+            anchor = source.anchor
+            freeOffset = CGVector(dx: source.free.x - mouse.x, dy: source.free.y - mouse.y)
+            moveSource = nil
+            moveOrigin = nil
+        }
+
         if moving, moveOrigin?.centered != centered {
             moveOrigin = (mouse: mouse, anchor: anchor, free: grabbedCorner(for: mouse, centered: centered),
                           box: currentRect(for: mouse, centered: centered), centered: centered)
@@ -368,18 +413,23 @@ public final class CropSelectionOverlay {
         }
 
         let rect = currentRect(for: mouse, centered: centered)
-        render(selection: rect, cursor: mouse, moving: moving, centered: centered)
+        render(selection: rect, cursor: mouse, moving: moving, centered: centered,
+               source: moveSource?.box)
 
         guard !held else { return }
 
-        // Mouse up: this is the crop.
-        let final = CropGeometry.rounded(rect)
-        guard let screen = startScreen,
-              final.width >= Self.minimumSide, final.height >= Self.minimumSide else {
-            finish(nil)
+        // Mouse up: this is the crop — or, with ⇧ still held, the source and
+        // where it goes. A destination too small to be one (⇧ pressed, nothing
+        // drawn yet) leaves the plain selection of the source.
+        let drawn = CropGeometry.rounded(rect)
+        let big = { (r: NSRect) in r.width >= Self.minimumSide && r.height >= Self.minimumSide }
+        guard let screen = startScreen else { finish(nil); return }
+        if let source = moveSource.map({ CropGeometry.rounded($0.box) }), big(source) {
+            finish(Selection(rect: source, screen: screen, movedTo: big(drawn) ? drawn : nil))
             return
         }
-        finish(Selection(rect: final, screen: screen))
+        guard big(drawn) else { finish(nil); return }
+        finish(Selection(rect: drawn, screen: screen))
     }
 
     private func startDrag(at mouse: NSPoint) {
@@ -390,6 +440,7 @@ public final class CropSelectionOverlay {
         anchor = CropGeometry.clamped(mouse, within: screen.frame)
         freeOffset = .zero
         moveOrigin = nil
+        moveSource = nil
         dragging = true
     }
 
@@ -424,16 +475,18 @@ public final class CropSelectionOverlay {
 
     // MARK: - Drawing
 
-    private func render(selection: NSRect?, cursor: NSPoint, moving: Bool, centered: Bool = false) {
+    private func render(selection: NSRect?, cursor: NSPoint, moving: Bool, centered: Bool = false,
+                        source: NSRect? = nil) {
         for entry in panels {
             let origin = entry.screen.frame.origin
-            let local = selection.map { NSRect(x: $0.minX - origin.x, y: $0.minY - origin.y,
-                                               width: $0.width, height: $0.height) }
-            entry.view.render(selection: local,
+            let toLocal = { (r: NSRect) in NSRect(x: r.minX - origin.x, y: r.minY - origin.y,
+                                                  width: r.width, height: r.height) }
+            entry.view.render(selection: selection.map(toLocal),
                               cursor: NSPoint(x: cursor.x - origin.x, y: cursor.y - origin.y),
                               size: selection.map { CGSize(width: $0.width.rounded(), height: $0.height.rounded()) },
                               moving: moving,
-                              centered: centered)
+                              centered: centered,
+                              source: source.map(toLocal))
         }
     }
 }
@@ -459,6 +512,10 @@ private final class CropPanel: NSPanel {
 private final class CropOverlayView: NSView {
     private let dim = CAShapeLayer()
     private let border = CAShapeLayer()
+    /// The ⇧-locked source box, dashed, and the arrow from its centre to the
+    /// destination's.
+    private let sourceBorder = CAShapeLayer()
+    private let arrow = CAShapeLayer()
     private let vGuide = CALayer()
     private let hGuide = CALayer()
     private let sizeLabel: PillLabel
@@ -486,6 +543,25 @@ private final class CropOverlayView: NSView {
         border.lineWidth = 2
         root.addSublayer(border)
 
+        sourceBorder.fillColor = nil
+        sourceBorder.strokeColor = style.accent.cgColor
+        sourceBorder.lineWidth = 2
+        sourceBorder.lineDashPattern = [6, 4]
+        sourceBorder.isHidden = true
+        root.addSublayer(sourceBorder)
+
+        arrow.fillColor = style.accent.cgColor
+        arrow.strokeColor = style.accent.cgColor
+        arrow.lineWidth = 3
+        arrow.lineCap = .round
+        arrow.lineJoin = .round
+        arrow.shadowColor = NSColor.black.cgColor
+        arrow.shadowOpacity = 0.6
+        arrow.shadowRadius = 2
+        arrow.shadowOffset = .zero
+        arrow.isHidden = true
+        root.addSublayer(arrow)
+
         for guide in [vGuide, hGuide] {
             guide.backgroundColor = style.accent.withAlphaComponent(0.55).cgColor
             root.addSublayer(guide)
@@ -507,15 +583,34 @@ private final class CropOverlayView: NSView {
     override func rightMouseUp(with event: NSEvent) {}
     override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
 
-    func render(selection: NSRect?, cursor: NSPoint, size: CGSize?, moving: Bool, centered: Bool) {
+    func render(selection: NSRect?, cursor: NSPoint, size: CGSize?, moving: Bool, centered: Bool,
+                source: NSRect? = nil) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
 
+        // Even-odd: two boxes that overlap would cancel each other's hole, so
+        // the source is only cut out of the dimming when the two are apart.
         let path = CGMutablePath()
         path.addRect(bounds)
         if let selection { path.addRect(selection) }
+        if let source, !(selection?.intersects(source) ?? false) { path.addRect(source) }
         dim.path = path
+
+        if let source {
+            sourceBorder.isHidden = false
+            sourceBorder.path = CGPath(rect: source.insetBy(dx: -1, dy: -1), transform: nil)
+            if let selection {
+                arrow.isHidden = false
+                arrow.path = Self.arrowPath(from: CGPoint(x: source.midX, y: source.midY),
+                                            to: CGPoint(x: selection.midX, y: selection.midY))
+            } else {
+                arrow.isHidden = true
+            }
+        } else {
+            sourceBorder.isHidden = true
+            arrow.isHidden = true
+        }
 
         if let selection, let size {
             border.isHidden = false
@@ -525,7 +620,7 @@ private final class CropOverlayView: NSView {
             hGuide.isHidden = true
             hint.layer.isHidden = true
             place(sizeLabel,
-                  text: readout(size: size, moving: moving, centered: centered),
+                  text: readout(size: size, moving: moving, centered: centered, movingTo: source != nil),
                   near: selection)
         } else {
             border.isHidden = true
@@ -549,7 +644,7 @@ private final class CropOverlayView: NSView {
 
     /// `500 × 320   ⌘ move   ⌥ centre` — the size, then both keys, each lit
     /// only while it is being held.
-    private func readout(size: CGSize, moving: Bool, centered: Bool) -> NSAttributedString {
+    private func readout(size: CGSize, moving: Bool, centered: Bool, movingTo: Bool) -> NSAttributedString {
         let font = Self.labelFont
         let out = NSMutableAttributedString(
             string: "\(Int(size.width)) × \(Int(size.height))",
@@ -565,7 +660,27 @@ private final class CropOverlayView: NSView {
         }
         legend(style.movingSuffix, moving)
         legend(style.centeredSuffix, centered)
+        if style.allowsMove { legend(style.moveToSuffix, movingTo) }
         return out
+    }
+
+    /// A shaft and a filled head, the head's tip on `to`. Nothing when the two
+    /// centres coincide — there is no direction to point in.
+    private static func arrowPath(from: CGPoint, to: CGPoint) -> CGPath {
+        let path = CGMutablePath()
+        let dx = to.x - from.x, dy = to.y - from.y
+        let length = (dx * dx + dy * dy).squareRoot()
+        guard length > 4 else { return path }
+        let ux = dx / length, uy = dy / length
+        let head = min(18, length * 0.4), wing = head * 0.55
+        let base = CGPoint(x: to.x - ux * head, y: to.y - uy * head)
+        path.move(to: from)
+        path.addLine(to: base)
+        path.move(to: to)
+        path.addLine(to: CGPoint(x: base.x - uy * wing, y: base.y + ux * wing))
+        path.addLine(to: CGPoint(x: base.x + uy * wing, y: base.y - ux * wing))
+        path.closeSubpath()
+        return path
     }
 
     /// The readout sits just under the selection, flipping above it when the box
