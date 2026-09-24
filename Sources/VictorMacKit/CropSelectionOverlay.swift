@@ -83,19 +83,24 @@ public struct CropSelectionStyle {
     public var allowsMove: Bool
     /// The legend word for ⇧, lit while a destination is being drawn.
     public var moveToSuffix: String
+    /// Beside the pointer while the source is locked and the destination not
+    /// yet drawn — the one moment nothing else on screen says what to do.
+    public var moveHint: String
 
     public init(accent: NSColor = .systemYellow,
                 hint: String = "drag an area  ·  ⌘ move  ·  ⌥ from centre  ·  Esc cancels",
                 movingSuffix: String = "⌘ move",
                 centeredSuffix: String = "⌥ centre",
                 allowsMove: Bool = false,
-                moveToSuffix: String = "⇧ move to") {
+                moveToSuffix: String = "⇧ move to",
+                moveHint: String = "wheel-drag where it goes  ·  Esc cancels") {
         self.accent = accent
         self.hint = hint
         self.movingSuffix = movingSuffix
         self.centeredSuffix = centeredSuffix
         self.allowsMove = allowsMove
         self.moveToSuffix = moveToSuffix
+        self.moveHint = moveHint
     }
 }
 
@@ -173,6 +178,29 @@ public final class CropSelectionOverlay {
         overlay.pushed = NSPoint(x: point.x, y: primary.frame.maxY - point.y)
         overlay.pushes += 1
         overlay.tick()
+    }
+
+    /// **The source is locked and the wheel is up: the next press is the
+    /// destination's** (2026-09-24). Told to the caller that owns the button,
+    /// because that press must be claimed on sight — no drag threshold, ⇧ and ⌘
+    /// allowed — where any other press would be a click to hand back. Called on
+    /// the main thread, `true` when the overlay parks, `false` when the
+    /// destination starts or the selection ends.
+    public static var onAwaitingDestination: ((Bool) -> Void)?
+
+    /// The button went down again while parked: draw the destination from
+    /// here. Global CG coordinates, like `dragMoved(toCG:)`. Main thread.
+    public static func destinationPressed(atCG point: CGPoint) {
+        guard let overlay = active, overlay.movePhase == .parked,
+              let primary = NSScreen.screens.first else { return }
+        overlay.startDestination(at: NSPoint(x: point.x, y: primary.frame.maxY - point.y))
+    }
+
+    /// Take a parked selection down with nothing filed — the sentence it
+    /// belonged to is over. A drag still under the hand is left alone. Main.
+    public static func cancelIfParked() {
+        guard let overlay = active, overlay.movePhase == .parked else { return }
+        overlay.finish(nil)
     }
 
     /// Must be called on the main thread.
@@ -258,6 +286,17 @@ public final class CropSelectionOverlay {
     /// hand, exactly the shape it was — *"if I release Shift then the whole
     /// thing falls back to the previous shape"*.
     private var moveSource: (box: NSRect, anchor: NSPoint, free: NSPoint)?
+    /// **Where the ⇧ move is** (2026-09-24, Victor: *"while shift down, an
+    /// arrow from center of first rectangle should follow my mouse, then stay
+    /// on center of 2nd box when drawn by wheel drag"*):
+    /// `pointing` — ⇧ pressed with the wheel still down: the source is locked
+    /// and the arrow follows the pointer; ⇧ let go here gives the box back.
+    /// `parked` — the wheel came up with the source locked: sticky, ⇧ no longer
+    /// needed, the arrow still follows. `drawing` — the wheel went down again
+    /// and the destination is being dragged; its release ships the move, or,
+    /// too small to be a box, parks again.
+    enum MovePhase { case none, pointing, parked, drawing }
+    private(set) var movePhase: MovePhase = .none
     private var finished = false
     /// How the box was kept up to date, reported once when the selection ends.
     /// The question it answers is the one that took a bug report to ask: *was
@@ -325,6 +364,7 @@ public final class CropSelectionOverlay {
     private func finish(_ selection: Selection?) {
         guard !finished else { return }
         finished = true
+        if movePhase != .none { Self.onAwaitingDestination?(false) }
         let seconds = Date().timeIntervalSince(startedAt)
         CropSelectionOverlay.log?(String(
             format: "✂️ selection over %.1fs — %d frames (%d pushed, %d polled), worst gap %.0fms",
@@ -379,20 +419,37 @@ public final class CropSelectionOverlay {
         // becomes the *middle* of the box, with the mouse still on a corner.
         let centered = flags.contains(.option)
 
-        // ⇧ held: lock the box as the source and start a destination at the
-        // pointer. Released: back to the source, as it was.
+        // ⇧ with the wheel down: lock the box as the source; the arrow follows
+        // the pointer until a destination is drawn. See `MovePhase`.
         let shifted = style.allowsMove && flags.contains(.shift)
-        if shifted, moveSource == nil {
-            moveSource = (box: currentRect(for: mouse, centered: centered),
-                          anchor: anchor, free: freeCorner(for: mouse))
-            anchor = CropGeometry.clamped(mouse, within: bounds)
-            freeOffset = .zero
-            moveOrigin = nil
-        } else if !shifted, let source = moveSource {
-            anchor = source.anchor
-            freeOffset = CGVector(dx: source.free.x - mouse.x, dy: source.free.y - mouse.y)
+        switch movePhase {
+        case .none:
+            let box = currentRect(for: mouse, centered: centered)
+            if shifted, held, box.width >= Self.minimumSide, box.height >= Self.minimumSide {
+                moveSource = (box: box, anchor: anchor, free: freeCorner(for: mouse))
+                moveOrigin = nil
+                movePhase = .pointing
+            }
+        case .pointing where !held:
+            // The wheel came up with the box locked: park, hands free.
+            movePhase = .parked
+            pushed = nil      // nothing is swallowed now; the pointer is polled
+            Self.onAwaitingDestination?(true)
+        case .pointing where !shifted:
+            // ⇧ let go with the wheel still down: the box, back in the hand.
+            if let source = moveSource {
+                anchor = source.anchor
+                freeOffset = CGVector(dx: source.free.x - mouse.x, dy: source.free.y - mouse.y)
+            }
             moveSource = nil
             moveOrigin = nil
+            movePhase = .none
+        default:
+            break
+        }
+        if movePhase == .pointing || movePhase == .parked {
+            render(selection: nil, cursor: mouse, moving: false, source: moveSource?.box, pointing: true)
+            return
         }
 
         if moving, moveOrigin?.centered != centered {
@@ -418,14 +475,21 @@ public final class CropSelectionOverlay {
 
         guard !held else { return }
 
-        // Mouse up: this is the crop — or, with ⇧ still held, the source and
-        // where it goes. A destination too small to be one (⇧ pressed, nothing
-        // drawn yet) leaves the plain selection of the source.
+        // Button up: this is the crop — or the destination of a move. A
+        // destination too small to be one (a click, not a drag) parks again:
+        // the source stays locked and the arrow goes back to the pointer.
         let drawn = CropGeometry.rounded(rect)
         let big = { (r: NSRect) in r.width >= Self.minimumSide && r.height >= Self.minimumSide }
         guard let screen = startScreen else { finish(nil); return }
-        if let source = moveSource.map({ CropGeometry.rounded($0.box) }), big(source) {
-            finish(Selection(rect: source, screen: screen, movedTo: big(drawn) ? drawn : nil))
+        if movePhase == .drawing, let source = moveSource.map({ CropGeometry.rounded($0.box) }) {
+            if big(drawn) {
+                finish(Selection(rect: source, screen: screen, movedTo: drawn))
+            } else {
+                movePhase = .parked
+                pushed = nil
+                Self.onAwaitingDestination?(true)
+                render(selection: nil, cursor: mouse, moving: false, source: moveSource?.box, pointing: true)
+            }
             return
         }
         guard big(drawn) else { finish(nil); return }
@@ -441,7 +505,21 @@ public final class CropSelectionOverlay {
         freeOffset = .zero
         moveOrigin = nil
         moveSource = nil
+        movePhase = .none
         dragging = true
+    }
+
+    /// The destination's corner: the second press, with the source locked.
+    private func startDestination(at point: NSPoint) {
+        guard let bounds = startScreen?.frame else { return }
+        movePhase = .drawing
+        released = false
+        anchor = CropGeometry.clamped(point, within: bounds)
+        freeOffset = .zero
+        moveOrigin = nil
+        pushed = point
+        Self.onAwaitingDestination?(false)
+        tick()
     }
 
     /// The box as it stands this tick: corner-to-corner from the anchor, or —
@@ -476,7 +554,7 @@ public final class CropSelectionOverlay {
     // MARK: - Drawing
 
     private func render(selection: NSRect?, cursor: NSPoint, moving: Bool, centered: Bool = false,
-                        source: NSRect? = nil) {
+                        source: NSRect? = nil, pointing: Bool = false) {
         for entry in panels {
             let origin = entry.screen.frame.origin
             let toLocal = { (r: NSRect) in NSRect(x: r.minX - origin.x, y: r.minY - origin.y,
@@ -486,7 +564,8 @@ public final class CropSelectionOverlay {
                               size: selection.map { CGSize(width: $0.width.rounded(), height: $0.height.rounded()) },
                               moving: moving,
                               centered: centered,
-                              source: source.map(toLocal))
+                              source: source.map(toLocal),
+                              pointing: pointing)
         }
     }
 }
@@ -584,7 +663,7 @@ private final class CropOverlayView: NSView {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
 
     func render(selection: NSRect?, cursor: NSPoint, size: CGSize?, moving: Bool, centered: Bool,
-                source: NSRect? = nil) {
+                source: NSRect? = nil, pointing: Bool = false) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
@@ -600,10 +679,11 @@ private final class CropOverlayView: NSView {
         if let source {
             sourceBorder.isHidden = false
             sourceBorder.path = CGPath(rect: source.insetBy(dx: -1, dy: -1), transform: nil)
-            if let selection {
+            // The arrow's tip: the destination's centre once there is one, the
+            // pointer while it is still being aimed.
+            if let tip = selection.map({ CGPoint(x: $0.midX, y: $0.midY) }) ?? (pointing ? cursor : nil) {
                 arrow.isHidden = false
-                arrow.path = Self.arrowPath(from: CGPoint(x: source.midX, y: source.midY),
-                                            to: CGPoint(x: selection.midX, y: selection.midY))
+                arrow.path = Self.arrowPath(from: CGPoint(x: source.midX, y: source.midY), to: tip)
             } else {
                 arrow.isHidden = true
             }
@@ -636,7 +716,7 @@ private final class CropOverlayView: NSView {
             // are the others. Say them once, while there is still nothing else
             // to read.
             place(hint, text: NSAttributedString(
-                    string: style.hint,
+                    string: pointing ? style.moveHint : style.hint,
                     attributes: [.font: Self.hintFont, .foregroundColor: NSColor.white]),
                   near: nil, cursor: cursor)
         }
