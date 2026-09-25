@@ -12,8 +12,7 @@ import QuartzCore
 ///
 /// **Why we stopped using the system's crosshair.** The selection had to learn
 /// one thing macOS's own only offers on the **space bar**: a box you are still
-/// dragging can be *moved* whole, instead of resized (and, with ⌥, drawn out
-/// from its middle rather than from a corner). `screencapture -i` cannot
+/// dragging can be *moved* whole, instead of resized. `screencapture -i` cannot
 /// be told to read ⌘ for that, and translating ⌘ into a synthetic space keypress
 /// means posting a key into a subprocess that owns the screen — one that
 /// arrives, if the modifier leaks, as ⌘Space, i.e. Spotlight over the workshop's
@@ -46,7 +45,7 @@ public enum CropDragButton {
 }
 
 /// The words and the colour, which are the only two things the two apps
-/// disagree about. Everything else — the dimming, the readout, ⌘, ⌥, Esc —
+/// disagree about. Everything else — the dimming, the readout, ⌘, Esc —
 /// is the same gesture in both, deliberately: Victor makes it in both apps,
 /// minutes apart, in the same workshop.
 ///
@@ -75,7 +74,8 @@ public struct CropSelectionStyle {
     /// said while they were a readout — is a symbol for something he can see
     /// happening anyway.
     public var movingSuffix: String
-    /// The other half of that pair; see `movingSuffix`.
+    /// **Unused since 2026-09-26**, when ⌥'s centred box was removed. Kept
+    /// only so callers that still pass it (Walkie Talkie) keep compiling.
     public var centeredSuffix: String
     /// **⇧ mid-drag: *this, moved to there*** (2026-09-24, Walkie Talkie only).
     /// Off by default, so an app that never asked for it keeps ⇧ meaning
@@ -90,7 +90,7 @@ public struct CropSelectionStyle {
     public init(accent: NSColor = .systemYellow,
                 hint: String = "",
                 movingSuffix: String = "⌘ move",
-                centeredSuffix: String = "⌥ centre",
+                centeredSuffix: String = "",
                 allowsMove: Bool = false,
                 moveToSuffix: String = "⇧ move to",
                 moveHint: String = "wheel-drag where it goes") {
@@ -165,7 +165,7 @@ public final class CropSelectionOverlay {
     ///
     /// So the position comes *in* rather than being fetched, and it draws on
     /// arrival. The timer stays for what only it can see — Esc, the right
-    /// button, ⌘ and ⌥ — and the box no longer depends on it being given a turn.
+    /// button, ⌘ — and the box no longer depends on it being given a turn.
     ///
     /// The point is in **global CG** coordinates, y down from the primary
     /// display's top, because that is what an event carries; the flip happens
@@ -276,12 +276,11 @@ public final class CropSelectionOverlay {
     private var startScreen: NSScreen?
     /// Set on the ⌘ press, cleared on the release: where the mouse and the box
     /// were when the move began, so the translation is always measured from
-    /// there rather than accumulated. `centered` is remembered too — ⌥ changes
-    /// what the box *is*, so toggling it mid-move restarts the measurement.
-    private var moveOrigin: (mouse: NSPoint, anchor: NSPoint, free: NSPoint, box: NSRect, centered: Bool)?
+    /// there rather than accumulated.
+    private var moveOrigin: (mouse: NSPoint, anchor: NSPoint, free: NSPoint, box: NSRect)?
     /// **The box locked by ⇧, and how to give it back.** While ⇧ is held the
     /// first box stands still as the *source* and a second one is drawn from
-    /// the pointer, corner to corner like the first (⌘ and ⌥ act on it).
+    /// the pointer, corner to corner like the first (⌘ acts on it).
     /// Letting ⇧ go drops the second box and hands the first one back to the
     /// hand, exactly the shape it was — *"if I release Shift then the whole
     /// thing falls back to the previous shape"*.
@@ -451,16 +450,15 @@ public final class CropSelectionOverlay {
         guard let bounds = startScreen?.frame else { finish(nil); return }
         let flags = NSEvent.modifierFlags
         let moving = flags.contains(.command)
-        // ⌥ held: the point the drag started from stops being a corner and
-        // becomes the *middle* of the box, with the mouse still on a corner.
-        let centered = flags.contains(.option)
+        // ⌥ does nothing here any more: the centred box it used to draw was
+        // removed on 2026-09-26 (Victor).
 
         // ⇧ with the wheel down: lock the box as the source; the arrow follows
         // the pointer until a destination is drawn. See `MovePhase`.
         let shifted = style.allowsMove && flags.contains(.shift)
         switch movePhase {
         case .none:
-            let box = currentRect(for: mouse, centered: centered)
+            let box = currentRect(for: mouse)
             if shifted, held, box.width >= Self.minimumSide, box.height >= Self.minimumSide {
                 moveSource = (box: box, anchor: anchor, free: freeCorner(for: mouse))
                 moveOrigin = nil
@@ -488,9 +486,9 @@ public final class CropSelectionOverlay {
             return
         }
 
-        if moving, moveOrigin?.centered != centered {
-            moveOrigin = (mouse: mouse, anchor: anchor, free: grabbedCorner(for: mouse, centered: centered),
-                          box: currentRect(for: mouse, centered: centered), centered: centered)
+        if moving, moveOrigin == nil {
+            moveOrigin = (mouse: mouse, anchor: anchor, free: freeCorner(for: mouse),
+                          box: currentRect(for: mouse))
         } else if !moving {
             moveOrigin = nil
         }
@@ -505,9 +503,8 @@ public final class CropSelectionOverlay {
                                   dy: origin.free.y + delta.dy - mouse.y)
         }
 
-        let rect = currentRect(for: mouse, centered: centered)
-        render(selection: rect, cursor: mouse, moving: moving, centered: centered,
-               source: moveSource?.box)
+        let rect = currentRect(for: mouse)
+        render(selection: rect, cursor: mouse, moving: moving, source: moveSource?.box)
 
         guard !held else { return }
 
@@ -558,26 +555,9 @@ public final class CropSelectionOverlay {
         tick()
     }
 
-    /// The box as it stands this tick: corner-to-corner from the anchor, or —
-    /// with ⌥ down — centred on the anchor with the mouse on a corner.
-    private func currentRect(for mouse: NSPoint, centered: Bool) -> NSRect {
-        let free = freeCorner(for: mouse)
-        guard centered, let bounds = startScreen?.frame else {
-            return CropGeometry.rect(from: anchor, to: free)
-        }
-        return CropGeometry.centeredRect(center: anchor, corner: free, within: bounds)
-    }
-
-    /// The corner a ⌘-move takes hold of: the one the *box* actually has, not
-    /// the raw mouse corner. In centred mode an edge may already be holding the
-    /// half-extent back, and carrying that unused reach into the move would let
-    /// the box grow on its way across the screen instead of just travelling.
-    private func grabbedCorner(for mouse: NSPoint, centered: Bool) -> NSPoint {
-        let free = freeCorner(for: mouse)
-        guard centered else { return free }
-        let box = currentRect(for: mouse, centered: true)
-        return NSPoint(x: free.x >= anchor.x ? box.maxX : box.minX,
-                       y: free.y >= anchor.y ? box.maxY : box.minY)
+    /// The box as it stands this tick: corner-to-corner from the anchor.
+    private func currentRect(for mouse: NSPoint) -> NSRect {
+        CropGeometry.rect(from: anchor, to: freeCorner(for: mouse))
     }
 
     /// The corner the mouse is dragging, held inside the starting screen.
@@ -589,7 +569,7 @@ public final class CropSelectionOverlay {
 
     // MARK: - Drawing
 
-    private func render(selection: NSRect?, cursor: NSPoint, moving: Bool, centered: Bool = false,
+    private func render(selection: NSRect?, cursor: NSPoint, moving: Bool,
                         source: NSRect? = nil, pointing: Bool = false) {
         for entry in panels {
             let origin = entry.screen.frame.origin
@@ -599,7 +579,6 @@ public final class CropSelectionOverlay {
                               cursor: NSPoint(x: cursor.x - origin.x, y: cursor.y - origin.y),
                               size: selection.map { CGSize(width: $0.width.rounded(), height: $0.height.rounded()) },
                               moving: moving,
-                              centered: centered,
                               source: source.map(toLocal),
                               pointing: pointing)
         }
@@ -647,8 +626,8 @@ private final class CropOverlayView: NSView {
     private let heightLabel: PillLabel
     private let scale: CGFloat
 
-    private static let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 19.5, weight: .semibold)
-    private static let hintFont = NSFont.systemFont(ofSize: 18, weight: .medium)
+    private static let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 15.6, weight: .semibold)
+    private static let hintFont = NSFont.systemFont(ofSize: 14.4, weight: .medium)
     private let style: CropSelectionStyle
 
     init(frame: NSRect, scale: CGFloat, style: CropSelectionStyle) {
@@ -720,7 +699,7 @@ private final class CropOverlayView: NSView {
     override func rightMouseUp(with event: NSEvent) {}
     override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
 
-    func render(selection: NSRect?, cursor: NSPoint, size: CGSize?, moving: Bool, centered: Bool,
+    func render(selection: NSRect?, cursor: NSPoint, size: CGSize?, moving: Bool,
                 source: NSRect? = nil, pointing: Bool = false) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -761,7 +740,7 @@ private final class CropOverlayView: NSView {
             edgeLabels.forEach { $0.layer.isHidden = true }
             renderSideDimensions(of: selection)
             place(sizeLabel,
-                  text: readout(moving: moving, centered: centered, movingTo: source != nil),
+                  text: readout(moving: moving, movingTo: source != nil),
                   near: selection)
         } else {
             border.isHidden = true
@@ -776,8 +755,7 @@ private final class CropOverlayView: NSView {
             hGuide.frame = CGRect(x: 0, y: cursor.y.rounded(), width: bounds.width, height: 1)
             renderEdgeDistances(cursor: cursor)
             sizeLabel.layer.isHidden = true
-            // ⌘ move and ⌥ centre mean nothing until there is a box, so they
-            // are taught by the legend under it once the drag starts (Victor,
+            // ⌘ move means nothing until there is a box, so it is taught by the legend under it once the drag starts (Victor,
             // 2026-09-26); before it, only the ⇧ move-to aim has something to
             // say. An empty hint draws no pill at all.
             let text = pointing ? style.moveHint : style.hint
@@ -859,9 +837,9 @@ private final class CropOverlayView: NSView {
                                          width: h.width, height: h.height)
     }
 
-    /// `⌘ move   ⌥ centre` under the box — the keys, each lit only while it
-    /// is being held. The numbers moved onto the box's own sides.
-    private func readout(moving: Bool, centered: Bool, movingTo: Bool) -> NSAttributedString {
+    /// `⌘ move` under the box — the key, lit only while it is being held. The
+    /// numbers moved onto the box's own sides.
+    private func readout(moving: Bool, movingTo: Bool) -> NSAttributedString {
         let font = Self.labelFont
         let out = NSMutableAttributedString()
         func legend(_ text: String, _ lit: Bool) {
@@ -874,7 +852,6 @@ private final class CropOverlayView: NSView {
                              .foregroundColor: lit ? style.accent : NSColor(white: 1, alpha: 0.45)]))
         }
         legend(style.movingSuffix, moving)
-        legend(style.centeredSuffix, centered)
         if style.allowsMove { legend(style.moveToSuffix, movingTo) }
         return out
     }
@@ -927,12 +904,12 @@ private final class PillLabel {
     let layer = CALayer()
     private let text = CATextLayer()
     private let font: NSFont
-    private static let padding = CGSize(width: 13, height: 7)
+    private static let padding = CGSize(width: 10, height: 6)
 
     init(font: NSFont, scale: CGFloat) {
         self.font = font
         layer.backgroundColor = NSColor.black.withAlphaComponent(0.72).cgColor
-        layer.cornerRadius = 7.5
+        layer.cornerRadius = 6
         layer.isHidden = true
         text.contentsScale = scale
         text.font = font
