@@ -88,7 +88,7 @@ public struct CropSelectionStyle {
     public var moveHint: String
 
     public init(accent: NSColor = .systemYellow,
-                hint: String = "⌘ move  ·  ⌥ centre",
+                hint: String = "",
                 movingSuffix: String = "⌘ move",
                 centeredSuffix: String = "⌥ centre",
                 allowsMove: Bool = false,
@@ -740,13 +740,19 @@ private final class CropOverlayView: NSView {
             hGuide.frame = CGRect(x: 0, y: cursor.y.rounded(), width: bounds.width, height: 1)
             renderEdgeDistances(cursor: cursor)
             sizeLabel.layer.isHidden = true
-            // The hold is the one gesture nothing on screen reveals; ⌘ and ⌥
-            // are the others. Say them once, while there is still nothing else
-            // to read.
-            place(hint, text: NSAttributedString(
-                    string: pointing ? style.moveHint : style.hint,
-                    attributes: [.font: Self.hintFont, .foregroundColor: NSColor.white]),
-                  near: nil, cursor: cursor)
+            // ⌘ move and ⌥ centre mean nothing until there is a box, so they
+            // are taught by the legend under it once the drag starts (Victor,
+            // 2026-09-26); before it, only the ⇧ move-to aim has something to
+            // say. An empty hint draws no pill at all.
+            let text = pointing ? style.moveHint : style.hint
+            if text.isEmpty {
+                hint.layer.isHidden = true
+            } else {
+                place(hint, text: NSAttributedString(
+                        string: text,
+                        attributes: [.font: Self.hintFont, .foregroundColor: NSColor.white]),
+                      near: nil, cursor: cursor)
+            }
         }
     }
 
