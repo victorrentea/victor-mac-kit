@@ -611,8 +611,8 @@ private final class CropOverlayView: NSView {
     private let heightLabel: PillLabel
     private let scale: CGFloat
 
-    private static let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
-    private static let hintFont = NSFont.systemFont(ofSize: 12, weight: .medium)
+    private static let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 19.5, weight: .semibold)
+    private static let hintFont = NSFont.systemFont(ofSize: 18, weight: .medium)
     private let style: CropSelectionStyle
 
     init(frame: NSRect, scale: CGFloat, style: CropSelectionStyle) {
@@ -876,12 +876,12 @@ private final class PillLabel {
     let layer = CALayer()
     private let text = CATextLayer()
     private let font: NSFont
-    private static let padding = CGSize(width: 9, height: 5)
+    private static let padding = CGSize(width: 13, height: 7)
 
     init(font: NSFont, scale: CGFloat) {
         self.font = font
         layer.backgroundColor = NSColor.black.withAlphaComponent(0.72).cgColor
-        layer.cornerRadius = 5
+        layer.cornerRadius = 7.5
         layer.isHidden = true
         text.contentsScale = scale
         text.font = font
