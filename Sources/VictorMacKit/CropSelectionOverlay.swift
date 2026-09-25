@@ -599,6 +599,12 @@ private final class CropOverlayView: NSView {
     private let hGuide = CALayer()
     private let sizeLabel: PillLabel
     private let hint: PillLabel
+    /// Before the drag: the distance from the pointer to each screen edge, in
+    /// pixels, on the middle of the guide that reaches it (left, right, bottom,
+    /// top), and a filled arrowhead where each guide meets its edge.
+    private let edgeLabels: [PillLabel]
+    private let edgeArrows = CAShapeLayer()
+    private let scale: CGFloat
 
     private static let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
     private static let hintFont = NSFont.systemFont(ofSize: 12, weight: .medium)
@@ -606,8 +612,10 @@ private final class CropOverlayView: NSView {
 
     init(frame: NSRect, scale: CGFloat, style: CropSelectionStyle) {
         self.style = style
+        self.scale = scale
         sizeLabel = PillLabel(font: Self.labelFont, scale: scale)
         hint = PillLabel(font: Self.hintFont, scale: scale)
+        edgeLabels = (0..<4).map { _ in PillLabel(font: Self.labelFont, scale: scale) }
         super.init(frame: frame)
         wantsLayer = true
         guard let root = layer else { return }
@@ -645,6 +653,11 @@ private final class CropOverlayView: NSView {
             guide.backgroundColor = style.accent.withAlphaComponent(0.55).cgColor
             root.addSublayer(guide)
         }
+
+        edgeArrows.fillColor = style.accent.cgColor
+        edgeArrows.strokeColor = nil
+        root.addSublayer(edgeArrows)
+        edgeLabels.forEach { root.addSublayer($0.layer) }
 
         root.addSublayer(sizeLabel.layer)
         root.addSublayer(hint.layer)
@@ -699,6 +712,8 @@ private final class CropOverlayView: NSView {
             vGuide.isHidden = true
             hGuide.isHidden = true
             hint.layer.isHidden = true
+            edgeArrows.isHidden = true
+            edgeLabels.forEach { $0.layer.isHidden = true }
             place(sizeLabel,
                   text: readout(size: size, moving: moving, centered: centered, movingTo: source != nil),
                   near: selection)
@@ -711,6 +726,7 @@ private final class CropOverlayView: NSView {
             hGuide.isHidden = false
             vGuide.frame = CGRect(x: cursor.x.rounded(), y: 0, width: 1, height: bounds.height)
             hGuide.frame = CGRect(x: 0, y: cursor.y.rounded(), width: bounds.width, height: 1)
+            renderEdgeDistances(cursor: cursor)
             sizeLabel.layer.isHidden = true
             // The hold is the one gesture nothing on screen reveals; ⌘ and ⌥
             // are the others. Say them once, while there is still nothing else
@@ -720,6 +736,40 @@ private final class CropOverlayView: NSView {
                     attributes: [.font: Self.hintFont, .foregroundColor: NSColor.white]),
                   near: nil, cursor: cursor)
         }
+    }
+
+    /// The four guides read as dimension lines: how far the pointer is from
+    /// each edge, in physical pixels (a retina reads twice its points), on the
+    /// middle of the guide, and an arrowhead where the guide meets the edge.
+    private func renderEdgeDistances(cursor: NSPoint) {
+        let x = cursor.x.rounded(), y = cursor.y.rounded()
+        let w = bounds.width, h = bounds.height
+        // (distance in points, middle of the guide, arrow tip on the edge, arrow direction)
+        let legs: [(CGFloat, CGPoint, CGPoint, CGVector)] = [
+            (x,     CGPoint(x: x / 2, y: y),           CGPoint(x: 0, y: y + 0.5), CGVector(dx: -1, dy: 0)),
+            (w - x, CGPoint(x: (x + w) / 2, y: y),     CGPoint(x: w, y: y + 0.5), CGVector(dx: 1, dy: 0)),
+            (y,     CGPoint(x: x, y: y / 2),           CGPoint(x: x + 0.5, y: 0), CGVector(dx: 0, dy: -1)),
+            (h - y, CGPoint(x: x, y: (y + h) / 2),     CGPoint(x: x + 0.5, y: h), CGVector(dx: 0, dy: 1)),
+        ]
+        let arrows = CGMutablePath()
+        let head: CGFloat = 12, wing: CGFloat = 6
+        for (i, (distance, middle, tip, dir)) in legs.enumerated() {
+            let pill = edgeLabels[i]
+            let size = pill.setText(NSAttributedString(
+                string: "\(Int((distance * scale).rounded()))",
+                attributes: [.font: Self.labelFont, .foregroundColor: NSColor.white]))
+            pill.layer.frame = CGRect(x: min(max(middle.x - size.width / 2, 4), max(4, w - size.width - 4)),
+                                      y: min(max(middle.y - size.height / 2, 4), max(4, h - size.height - 4)),
+                                      width: size.width, height: size.height)
+            guard distance > head else { continue }
+            let base = CGPoint(x: tip.x - dir.dx * head, y: tip.y - dir.dy * head)
+            arrows.move(to: tip)
+            arrows.addLine(to: CGPoint(x: base.x - dir.dy * wing, y: base.y + dir.dx * wing))
+            arrows.addLine(to: CGPoint(x: base.x + dir.dy * wing, y: base.y - dir.dx * wing))
+            arrows.closeSubpath()
+        }
+        edgeArrows.isHidden = false
+        edgeArrows.path = arrows
     }
 
     /// `500 × 320   ⌘ move   ⌥ centre` — the size, then both keys, each lit
