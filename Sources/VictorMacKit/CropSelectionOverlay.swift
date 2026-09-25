@@ -328,6 +328,7 @@ public final class CropSelectionOverlay {
         NSCursor.hide()
         CGDisplayHideCursor(CGMainDisplayID())
         hidCursor = true
+        Self.startEscapeTap()
         for screen in NSScreen.screens {
             let panel = CropPanel(contentRect: screen.frame,
                                   styleMask: [.borderless, .nonactivatingPanel],
@@ -381,6 +382,7 @@ public final class CropSelectionOverlay {
             seconds, ticks, pushes, ticks - pushes, worstGap * 1000))
         timer?.invalidate()
         timer = nil
+        Self.stopEscapeTapSoon()
         for entry in panels { entry.panel.orderOut(nil) }
         // Hide/show are counted: exactly one release, or someone else's hide
         // is cancelled (or ours is never undone).
@@ -417,6 +419,73 @@ public final class CropSelectionOverlay {
     }()
 
     private static func armBackgroundCursorHiding() { _ = backgroundCursorHidingArmed }
+
+    // MARK: - Esc stays here
+
+    /// **Esc cancels the crop and goes no further** (Victor, 2026-09-26). The
+    /// panels are non-activating, so a key goes to the frontmost app, not to
+    /// them — polling `keyState` saw Esc, but the app underneath got it too
+    /// (a terminal abandoning its prompt, a dialog closing). A session tap eats
+    /// both the press and its release while the crop is up; the press ends the
+    /// crop directly. The tap outlives `finish` until the release arrives (or
+    /// a second passes), so the lone key-up is not handed on either.
+    private static var escapeTap: CFMachPort?
+    private static var escapeTapSource: CFRunLoopSource?
+    private static var escapeHeld = false
+    private static let escKeyCode: Int64 = 53
+
+    private static func startEscapeTap() {
+        stopEscapeTap()
+        let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
+        guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap,
+                                          options: .defaultTap, eventsOfInterest: CGEventMask(mask),
+                                          callback: { _, type, event, _ in
+            CropSelectionOverlay.handleEscapeTap(type: type, event: event)
+        }, userInfo: nil) else {
+            log?("✂️ Esc tap unavailable — Esc will reach the app underneath")
+            return
+        }
+        let source = CFMachPortCreateRunLoopSource(nil, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        escapeTap = tap
+        escapeTapSource = source
+    }
+
+    private static func handleEscapeTap(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let escapeTap { CGEvent.tapEnable(tap: escapeTap, enable: true) }
+            return Unmanaged.passUnretained(event)
+        }
+        guard event.getIntegerValueField(.keyboardEventKeycode) == escKeyCode else {
+            return Unmanaged.passUnretained(event)
+        }
+        if type == .keyDown {
+            escapeHeld = true
+            active?.finish(nil)
+        } else if type == .keyUp {
+            escapeHeld = false
+            if active?.finished ?? true { stopEscapeTap() }
+        }
+        return nil
+    }
+
+    /// After the crop: gone now unless Esc is still down, in which case its
+    /// release is the one event left to eat.
+    private static func stopEscapeTapSoon() {
+        guard escapeHeld else { stopEscapeTap(); return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            if active == nil || active?.finished == true { stopEscapeTap() }
+        }
+    }
+
+    private static func stopEscapeTap() {
+        escapeHeld = false
+        if let escapeTap { CGEvent.tapEnable(tap: escapeTap, enable: false); CFMachPortInvalidate(escapeTap) }
+        if let escapeTapSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), escapeTapSource, .commonModes) }
+        escapeTap = nil
+        escapeTapSource = nil
+    }
 
     // MARK: - The loop
 
@@ -770,27 +839,18 @@ private final class CropOverlayView: NSView {
         }
     }
 
-    /// How far from the pointer each distance pill sits along its guide.
-    /// **Fixed**, not the middle of the guide (Victor, 2026-09-26): the four
-    /// numbers stay in one place around the pointer where the eye already is,
-    /// instead of drifting across the screen as it moves. 70 pt keeps the
-    /// horizontal and vertical pills clear of one another.
-    private static let edgeLabelOffset: CGFloat = 70
-
     /// The four guides read as dimension lines: how far the pointer is from
-    /// each edge, in physical pixels (a retina reads twice its points), on a
-    /// pill a fixed distance out along the guide, and an arrowhead where the
-    /// guide meets the edge.
+    /// each edge, in physical pixels (a retina reads twice its points), on the
+    /// middle of the guide, and an arrowhead where the guide meets the edge.
     private func renderEdgeDistances(cursor: NSPoint) {
         let x = cursor.x.rounded(), y = cursor.y.rounded()
         let w = bounds.width, h = bounds.height
-        let d = Self.edgeLabelOffset
-        // (distance in points, pill centre, arrow tip on the edge, arrow direction)
+        // (distance in points, middle of the guide, arrow tip on the edge, arrow direction)
         let legs: [(CGFloat, CGPoint, CGPoint, CGVector)] = [
-            (x,     CGPoint(x: x - d, y: y), CGPoint(x: 0, y: y + 0.5), CGVector(dx: -1, dy: 0)),
-            (w - x, CGPoint(x: x + d, y: y), CGPoint(x: w, y: y + 0.5), CGVector(dx: 1, dy: 0)),
-            (y,     CGPoint(x: x, y: y - d), CGPoint(x: x + 0.5, y: 0), CGVector(dx: 0, dy: -1)),
-            (h - y, CGPoint(x: x, y: y + d), CGPoint(x: x + 0.5, y: h), CGVector(dx: 0, dy: 1)),
+            (x,     CGPoint(x: x / 2, y: y),           CGPoint(x: 0, y: y + 0.5), CGVector(dx: -1, dy: 0)),
+            (w - x, CGPoint(x: (x + w) / 2, y: y),     CGPoint(x: w, y: y + 0.5), CGVector(dx: 1, dy: 0)),
+            (y,     CGPoint(x: x, y: y / 2),           CGPoint(x: x + 0.5, y: 0), CGVector(dx: 0, dy: -1)),
+            (h - y, CGPoint(x: x, y: (y + h) / 2),     CGPoint(x: x + 0.5, y: h), CGVector(dx: 0, dy: 1)),
         ]
         let arrows = CGMutablePath()
         let head: CGFloat = 12, wing: CGFloat = 6
