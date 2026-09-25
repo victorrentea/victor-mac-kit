@@ -88,7 +88,7 @@ public struct CropSelectionStyle {
     public var moveHint: String
 
     public init(accent: NSColor = .systemYellow,
-                hint: String = "drag an area  ·  ⌘ move  ·  ⌥ from centre  ·  Esc cancels",
+                hint: String = "⌘ move  ·  ⌥ from centre  ·  Esc cancels",
                 movingSuffix: String = "⌘ move",
                 centeredSuffix: String = "⌥ centre",
                 allowsMove: Bool = false,
