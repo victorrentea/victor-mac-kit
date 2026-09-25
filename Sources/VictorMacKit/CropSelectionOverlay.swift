@@ -88,12 +88,12 @@ public struct CropSelectionStyle {
     public var moveHint: String
 
     public init(accent: NSColor = .systemYellow,
-                hint: String = "⌘ move  ·  ⌥ from centre  ·  Esc cancels",
+                hint: String = "⌘ move  ·  ⌥ centre",
                 movingSuffix: String = "⌘ move",
                 centeredSuffix: String = "⌥ centre",
                 allowsMove: Bool = false,
                 moveToSuffix: String = "⇧ move to",
-                moveHint: String = "wheel-drag where it goes  ·  Esc cancels") {
+                moveHint: String = "wheel-drag where it goes") {
         self.accent = accent
         self.hint = hint
         self.movingSuffix = movingSuffix
@@ -604,6 +604,11 @@ private final class CropOverlayView: NSView {
     /// top), and a filled arrowhead where each guide meets its edge.
     private let edgeLabels: [PillLabel]
     private let edgeArrows = CAShapeLayer()
+    /// While dragging: the width in pixels above the top side, the height to
+    /// the left of the left side — outside the box, so what is being framed
+    /// stays clean.
+    private let widthLabel: PillLabel
+    private let heightLabel: PillLabel
     private let scale: CGFloat
 
     private static let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
@@ -616,6 +621,8 @@ private final class CropOverlayView: NSView {
         sizeLabel = PillLabel(font: Self.labelFont, scale: scale)
         hint = PillLabel(font: Self.hintFont, scale: scale)
         edgeLabels = (0..<4).map { _ in PillLabel(font: Self.labelFont, scale: scale) }
+        widthLabel = PillLabel(font: Self.labelFont, scale: scale)
+        heightLabel = PillLabel(font: Self.labelFont, scale: scale)
         super.init(frame: frame)
         wantsLayer = true
         guard let root = layer else { return }
@@ -658,6 +665,8 @@ private final class CropOverlayView: NSView {
         edgeArrows.strokeColor = nil
         root.addSublayer(edgeArrows)
         edgeLabels.forEach { root.addSublayer($0.layer) }
+        root.addSublayer(widthLabel.layer)
+        root.addSublayer(heightLabel.layer)
 
         root.addSublayer(sizeLabel.layer)
         root.addSublayer(hint.layer)
@@ -714,11 +723,14 @@ private final class CropOverlayView: NSView {
             hint.layer.isHidden = true
             edgeArrows.isHidden = true
             edgeLabels.forEach { $0.layer.isHidden = true }
+            renderSideDimensions(of: selection)
             place(sizeLabel,
-                  text: readout(size: size, moving: moving, centered: centered, movingTo: source != nil),
+                  text: readout(moving: moving, centered: centered, movingTo: source != nil),
                   near: selection)
         } else {
             border.isHidden = true
+            widthLabel.layer.isHidden = true
+            heightLabel.layer.isHidden = true
             // Before the drag there is no box to look at, so the crosshair is
             // the whole screen's width and height crossing under the pointer —
             // ours, drawn, because the arrow belongs to whatever app is in front.
@@ -772,16 +784,38 @@ private final class CropOverlayView: NSView {
         edgeArrows.path = arrows
     }
 
-    /// `500 × 320   ⌘ move   ⌥ centre` — the size, then both keys, each lit
-    /// only while it is being held.
-    private func readout(size: CGSize, moving: Bool, centered: Bool, movingTo: Bool) -> NSAttributedString {
+    /// The box's size in physical pixels on its own sides, dimension-line
+    /// style: the width centred **above the top side**, the height centred
+    /// **left of the left side**. Each flips to the opposite side when the
+    /// screen edge leaves no room, and never goes inside the box.
+    private func renderSideDimensions(of box: NSRect) {
+        let gap: CGFloat = 6
+        let text = { (points: CGFloat) in NSAttributedString(
+            string: "\(Int((points * self.scale).rounded()))",
+            attributes: [.font: Self.labelFont, .foregroundColor: NSColor.white]) }
+
+        let w = widthLabel.setText(text(box.width))
+        var wy = box.maxY + gap
+        if wy + w.height > bounds.height - 4 { wy = box.minY - gap - w.height }
+        widthLabel.layer.frame = CGRect(x: min(max(box.midX - w.width / 2, 4), max(4, bounds.width - w.width - 4)),
+                                        y: wy, width: w.width, height: w.height)
+
+        let h = heightLabel.setText(text(box.height))
+        var hx = box.minX - gap - h.width
+        if hx < 4 { hx = box.maxX + gap }
+        heightLabel.layer.frame = CGRect(x: hx,
+                                         y: min(max(box.midY - h.height / 2, 4), max(4, bounds.height - h.height - 4)),
+                                         width: h.width, height: h.height)
+    }
+
+    /// `⌘ move   ⌥ centre` under the box — the keys, each lit only while it
+    /// is being held. The numbers moved onto the box's own sides.
+    private func readout(moving: Bool, centered: Bool, movingTo: Bool) -> NSAttributedString {
         let font = Self.labelFont
-        let out = NSMutableAttributedString(
-            string: "\(Int(size.width)) × \(Int(size.height))",
-            attributes: [.font: font, .foregroundColor: NSColor.white])
+        let out = NSMutableAttributedString()
         func legend(_ text: String, _ lit: Bool) {
             out.append(NSAttributedString(
-                string: "   " + text,
+                string: (out.length == 0 ? "" : "   ") + text,
                 attributes: [.font: font,
                              // Dim rather than hidden: it is a legend the rest of
                              // the time, and a word that appears only once you are
