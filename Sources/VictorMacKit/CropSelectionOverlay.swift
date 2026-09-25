@@ -298,6 +298,10 @@ public final class CropSelectionOverlay {
     enum MovePhase { case none, pointing, parked, drawing }
     private(set) var movePhase: MovePhase = .none
     private var finished = false
+    /// The real pointer is hidden for the whole crop — the guides and the box
+    /// already say where it is, and the arrow on top of the pixels being
+    /// framed is noise (Victor, 2026-09-26). Released once, in `finish`.
+    private var hidCursor = false
     /// How the box was kept up to date, reported once when the selection ends.
     /// The question it answers is the one that took a bug report to ask: *was
     /// the box actually being redrawn while the button was down?*
@@ -318,6 +322,13 @@ public final class CropSelectionOverlay {
     // MARK: - Lifecycle
 
     private func show(startingAt anchor: NSPoint?) {
+        // `SetsCursorInBackground` first: this app is not frontmost (the panels
+        // are non-activating), and without it the hide only applies while it
+        // is. Same technique as victor-effects' heartbeat.
+        Self.armBackgroundCursorHiding()
+        NSCursor.hide()
+        CGDisplayHideCursor(CGMainDisplayID())
+        hidCursor = true
         for screen in NSScreen.screens {
             let panel = CropPanel(contentRect: screen.frame,
                                   styleMask: [.borderless, .nonactivatingPanel],
@@ -372,6 +383,13 @@ public final class CropSelectionOverlay {
         timer?.invalidate()
         timer = nil
         for entry in panels { entry.panel.orderOut(nil) }
+        // Hide/show are counted: exactly one release, or someone else's hide
+        // is cancelled (or ours is never undone).
+        if hidCursor {
+            hidCursor = false
+            NSCursor.unhide()
+            CGDisplayShowCursor(CGMainDisplayID())
+        }
 
         // The panels are gone from AppKit's point of view; the compositor needs
         // a beat before the pixels behind them are what a capture would see.
@@ -382,6 +400,24 @@ public final class CropSelectionOverlay {
         }
         panels.removeAll()
     }
+
+    /// `CGDisplayHideCursor` normally works only while the calling app is
+    /// frontmost; the window server's private per-connection
+    /// `SetsCursorInBackground` flag lifts that. Resolved via dlsym so a macOS
+    /// without the symbols degrades to "pointer visible" instead of failing to
+    /// load. Set once; a process exit releases any hide with its connection.
+    private static let backgroundCursorHidingArmed: Bool = {
+        typealias DefaultConnFn = @convention(c) () -> Int32
+        typealias SetPropFn = @convention(c) (Int32, Int32, CFString, CFTypeRef) -> Int32
+        let rtldDefault = UnsafeMutableRawPointer(bitPattern: -2)  // RTLD_DEFAULT
+        guard let connSym = dlsym(rtldDefault, "_CGSDefaultConnection"),
+              let propSym = dlsym(rtldDefault, "CGSSetConnectionProperty") else { return false }
+        let cid = unsafeBitCast(connSym, to: DefaultConnFn.self)()
+        _ = unsafeBitCast(propSym, to: SetPropFn.self)(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
+        return true
+    }()
+
+    private static func armBackgroundCursorHiding() { _ = backgroundCursorHidingArmed }
 
     // MARK: - The loop
 
@@ -756,18 +792,27 @@ private final class CropOverlayView: NSView {
         }
     }
 
+    /// How far from the pointer each distance pill sits along its guide.
+    /// **Fixed**, not the middle of the guide (Victor, 2026-09-26): the four
+    /// numbers stay in one place around the pointer where the eye already is,
+    /// instead of drifting across the screen as it moves. 70 pt keeps the
+    /// horizontal and vertical pills clear of one another.
+    private static let edgeLabelOffset: CGFloat = 70
+
     /// The four guides read as dimension lines: how far the pointer is from
-    /// each edge, in physical pixels (a retina reads twice its points), on the
-    /// middle of the guide, and an arrowhead where the guide meets the edge.
+    /// each edge, in physical pixels (a retina reads twice its points), on a
+    /// pill a fixed distance out along the guide, and an arrowhead where the
+    /// guide meets the edge.
     private func renderEdgeDistances(cursor: NSPoint) {
         let x = cursor.x.rounded(), y = cursor.y.rounded()
         let w = bounds.width, h = bounds.height
-        // (distance in points, middle of the guide, arrow tip on the edge, arrow direction)
+        let d = Self.edgeLabelOffset
+        // (distance in points, pill centre, arrow tip on the edge, arrow direction)
         let legs: [(CGFloat, CGPoint, CGPoint, CGVector)] = [
-            (x,     CGPoint(x: x / 2, y: y),           CGPoint(x: 0, y: y + 0.5), CGVector(dx: -1, dy: 0)),
-            (w - x, CGPoint(x: (x + w) / 2, y: y),     CGPoint(x: w, y: y + 0.5), CGVector(dx: 1, dy: 0)),
-            (y,     CGPoint(x: x, y: y / 2),           CGPoint(x: x + 0.5, y: 0), CGVector(dx: 0, dy: -1)),
-            (h - y, CGPoint(x: x, y: (y + h) / 2),     CGPoint(x: x + 0.5, y: h), CGVector(dx: 0, dy: 1)),
+            (x,     CGPoint(x: x - d, y: y), CGPoint(x: 0, y: y + 0.5), CGVector(dx: -1, dy: 0)),
+            (w - x, CGPoint(x: x + d, y: y), CGPoint(x: w, y: y + 0.5), CGVector(dx: 1, dy: 0)),
+            (y,     CGPoint(x: x, y: y - d), CGPoint(x: x + 0.5, y: 0), CGVector(dx: 0, dy: -1)),
+            (h - y, CGPoint(x: x, y: y + d), CGPoint(x: x + 0.5, y: h), CGVector(dx: 0, dy: 1)),
         ]
         let arrows = CGMutablePath()
         let head: CGFloat = 12, wing: CGFloat = 6
