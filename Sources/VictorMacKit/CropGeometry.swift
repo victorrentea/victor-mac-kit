@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 
 /// Pure geometry for a dragged screen region: building the rectangle —
-/// corner-to-corner — moving it while ⌘ is held, and keeping it inside the screen it was started on.
+/// corner-to-corner — squaring it while ⌃ is held, moving it while ⌘ is held, and keeping it inside the screen it was started on.
 ///
 /// Every decision here is arithmetic, so it is decided here and unit-tested
 /// here — the overlay above it only has to draw what this says. Same bargain as
@@ -24,6 +24,22 @@ public enum CropGeometry {
     public static func clamped(_ point: CGPoint, within bounds: CGRect) -> CGPoint {
         CGPoint(x: min(max(point.x, bounds.minX), bounds.maxX),
                 y: min(max(point.y, bounds.minY), bounds.maxY))
+    }
+
+    /// **⌃ held: the free corner pulled onto the square's diagonal** (Victor,
+    /// 2026-10-02). The side is the longer of the two the hand has dragged, so
+    /// the box grows toward the pointer instead of lagging behind it on one
+    /// axis — then cut back to whatever room the anchor has toward the screen
+    /// edges in the direction being dragged, so the square never leaves the
+    /// screen and never stops being square. Direction comes from the drag; a
+    /// zero axis counts as positive, so a purely horizontal drag still opens up.
+    public static func squareCorner(from anchor: CGPoint, toward corner: CGPoint, within bounds: CGRect) -> CGPoint {
+        let dx = corner.x - anchor.x, dy = corner.y - anchor.y
+        let sx: CGFloat = dx < 0 ? -1 : 1, sy: CGFloat = dy < 0 ? -1 : 1
+        let roomX = sx > 0 ? bounds.maxX - anchor.x : anchor.x - bounds.minX
+        let roomY = sy > 0 ? bounds.maxY - anchor.y : anchor.y - bounds.minY
+        let side = max(0, min(max(abs(dx), abs(dy)), roomX, roomY))
+        return CGPoint(x: anchor.x + sx * side, y: anchor.y + sy * side)
     }
 
     /// How far the box may actually follow the mouse while ⌘ is held: the raw

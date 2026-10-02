@@ -23,6 +23,23 @@ final class CropGeometryTests: XCTestCase {
                        CGPoint(x: 400, y: 400), "a point already inside is left alone")
     }
 
+    // MARK: - ⌃ square
+
+    func testSquareTakesTheLongerSideInTheDragDirection() {
+        let a = CGPoint(x: 400, y: 400)
+        XCTAssertEqual(CropGeometry.squareCorner(from: a, toward: CGPoint(x: 600, y: 450), within: screen),
+                       CGPoint(x: 600, y: 600))
+        XCTAssertEqual(CropGeometry.squareCorner(from: a, toward: CGPoint(x: 350, y: 100), within: screen),
+                       CGPoint(x: 100, y: 100), "up-left drags square up-left")
+    }
+
+    func testSquareShrinksToTheRoomLeftBeforeAnEdge() {
+        // 300 wide asked for, but only 117 points to the top of the screen.
+        let corner = CropGeometry.squareCorner(from: CGPoint(x: 400, y: 1000),
+                                               toward: CGPoint(x: 700, y: 1050), within: screen)
+        XCTAssertEqual(corner, CGPoint(x: 517, y: 1117))
+    }
+
     func testMoveFollowsTheMouseWhileThereIsRoom() {
         let box = CGRect(x: 400, y: 400, width: 200, height: 100)
         let moved = CropGeometry.moved(box, by: CGVector(dx: 60, dy: -30), within: screen)

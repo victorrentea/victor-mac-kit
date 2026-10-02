@@ -74,6 +74,9 @@ public struct CropSelectionStyle {
     /// said while they were a readout — is a symbol for something he can see
     /// happening anyway.
     public var movingSuffix: String
+    /// The legend word for ⌃, lit while the box is held square (2026-10-02).
+    /// The ↘ beside the key is the diagonal the free corner is pulled onto.
+    public var squareSuffix: String
     /// **Unused since 2026-09-26**, when ⌥'s centred box was removed. Kept
     /// only so callers that still pass it (Walkie Talkie) keep compiling.
     public var centeredSuffix: String
@@ -90,6 +93,7 @@ public struct CropSelectionStyle {
     public init(accent: NSColor = .systemYellow,
                 hint: String = "",
                 movingSuffix: String = "⌘ move",
+                squareSuffix: String = "⌃↘ square",
                 centeredSuffix: String = "",
                 allowsMove: Bool = false,
                 moveToSuffix: String = "⇧ move to",
@@ -97,6 +101,7 @@ public struct CropSelectionStyle {
         self.accent = accent
         self.hint = hint
         self.movingSuffix = movingSuffix
+        self.squareSuffix = squareSuffix
         self.centeredSuffix = centeredSuffix
         self.allowsMove = allowsMove
         self.moveToSuffix = moveToSuffix
@@ -274,6 +279,14 @@ public final class CropSelectionOverlay {
     /// not depend on the caller being alive.
     private let driven: Bool
     private var startScreen: NSScreen?
+    /// **⌃ held: the box is a square** (Victor, 2026-10-02) — see
+    /// `CropGeometry.squareCorner`. Read every tick, like ⌘.
+    private var squaring = false
+    /// ⌃ counts only once it has been seen *up* since the overlay opened.
+    /// Victor Addons puts this up on a held **⌃**P, and the crosshair appears
+    /// while that ⌃ is still down — a drag started before the finger leaves it
+    /// would otherwise come out square without anyone asking.
+    private var controlArmed = false
     /// Set on the ⌘ press, cleared on the release: where the mouse and the box
     /// were when the move began, so the translation is always measured from
     /// there rather than accumulated.
@@ -519,6 +532,8 @@ public final class CropSelectionOverlay {
         guard let bounds = startScreen?.frame else { finish(nil); return }
         let flags = NSEvent.modifierFlags
         let moving = flags.contains(.command)
+        if !flags.contains(.control) { controlArmed = true }
+        squaring = controlArmed && flags.contains(.control)
         // ⌥ does nothing here any more: the centred box it used to draw was
         // removed on 2026-09-26 (Victor).
 
@@ -573,7 +588,7 @@ public final class CropSelectionOverlay {
         }
 
         let rect = currentRect(for: mouse)
-        render(selection: rect, cursor: mouse, moving: moving, source: moveSource?.box)
+        render(selection: rect, cursor: mouse, moving: moving, squaring: squaring, source: moveSource?.box)
 
         guard !held else { return }
 
@@ -629,16 +644,18 @@ public final class CropSelectionOverlay {
         CropGeometry.rect(from: anchor, to: freeCorner(for: mouse))
     }
 
-    /// The corner the mouse is dragging, held inside the starting screen.
+    /// The corner the mouse is dragging, held inside the starting screen —
+    /// and, while ⌃ is held, onto the square's diagonal from the anchor.
     private func freeCorner(for mouse: NSPoint) -> NSPoint {
         let raw = NSPoint(x: mouse.x + freeOffset.dx, y: mouse.y + freeOffset.dy)
         guard let bounds = startScreen?.frame else { return raw }
-        return CropGeometry.clamped(raw, within: bounds)
+        let corner = CropGeometry.clamped(raw, within: bounds)
+        return squaring ? CropGeometry.squareCorner(from: anchor, toward: corner, within: bounds) : corner
     }
 
     // MARK: - Drawing
 
-    private func render(selection: NSRect?, cursor: NSPoint, moving: Bool,
+    private func render(selection: NSRect?, cursor: NSPoint, moving: Bool, squaring: Bool = false,
                         source: NSRect? = nil, pointing: Bool = false) {
         for entry in panels {
             let origin = entry.screen.frame.origin
@@ -648,6 +665,7 @@ public final class CropSelectionOverlay {
                               cursor: NSPoint(x: cursor.x - origin.x, y: cursor.y - origin.y),
                               size: selection.map { CGSize(width: $0.width.rounded(), height: $0.height.rounded()) },
                               moving: moving,
+                              squaring: squaring,
                               source: source.map(toLocal),
                               pointing: pointing)
         }
@@ -768,7 +786,7 @@ private final class CropOverlayView: NSView {
     override func rightMouseUp(with event: NSEvent) {}
     override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
 
-    func render(selection: NSRect?, cursor: NSPoint, size: CGSize?, moving: Bool,
+    func render(selection: NSRect?, cursor: NSPoint, size: CGSize?, moving: Bool, squaring: Bool = false,
                 source: NSRect? = nil, pointing: Bool = false) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -809,7 +827,7 @@ private final class CropOverlayView: NSView {
             edgeLabels.forEach { $0.layer.isHidden = true }
             renderSideDimensions(of: selection)
             place(sizeLabel,
-                  text: readout(moving: moving, movingTo: source != nil),
+                  text: readout(moving: moving, squaring: squaring, movingTo: source != nil),
                   near: selection)
         } else {
             border.isHidden = true
@@ -897,9 +915,9 @@ private final class CropOverlayView: NSView {
                                          width: h.width, height: h.height)
     }
 
-    /// `⌘ move` under the box — the key, lit only while it is being held. The
-    /// numbers moved onto the box's own sides.
-    private func readout(moving: Bool, movingTo: Bool) -> NSAttributedString {
+    /// `⌘ move   ⌃↘ square` under the box — the keys, each lit only while it
+    /// is being held. The numbers moved onto the box's own sides.
+    private func readout(moving: Bool, squaring: Bool, movingTo: Bool) -> NSAttributedString {
         let font = Self.labelFont
         let out = NSMutableAttributedString()
         func legend(_ text: String, _ lit: Bool) {
@@ -912,6 +930,7 @@ private final class CropOverlayView: NSView {
                              .foregroundColor: lit ? style.accent : NSColor(white: 1, alpha: 0.45)]))
         }
         legend(style.movingSuffix, moving)
+        if !style.squareSuffix.isEmpty { legend(style.squareSuffix, squaring) }
         if style.allowsMove { legend(style.moveToSuffix, movingTo) }
         return out
     }
