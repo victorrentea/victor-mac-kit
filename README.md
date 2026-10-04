@@ -9,6 +9,7 @@ Today that is one gesture: **dragging out a region of the screen**.
 | file | what it is |
 |---|---|
 | `CropGeometry` | the arithmetic — the box from two corners, ⌥ from the middle, ⌘ moving it, held inside its screen, and the flip into image pixels. Decided here, unit-tested here. |
+| `RegionDrag` | the hand's half of the drag — anchor, free corner, ⌘ moving the box, ⌃ holding it square — as a value fed one tick at a time. Also drives Victor Addons' 🔦 glass spotlight (⇧ + wheel-drag), so that gesture answers the crop's keys by running the crop's code. |
 | `CropSelectionOverlay` | the dimming, the rectangle, the size readout. One panel per screen, driven by a 60 Hz poll of session input state rather than by AppKit events, so it needs no key window and steals no focus from the room. |
 | `CropCapture` | the chosen rectangle → a JPEG, by capturing the whole display and cropping at the display's real pixel scale. |
 

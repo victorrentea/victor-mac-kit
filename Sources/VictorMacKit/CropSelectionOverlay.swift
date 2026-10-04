@@ -248,11 +248,10 @@ public final class CropSelectionOverlay {
     private var panels: [(panel: NSPanel, view: CropOverlayView, screen: NSScreen)] = []
     private var timer: Timer?
 
-    /// The corner that stays put while the mouse drags the other one.
-    private var anchor: NSPoint = .zero
-    /// Free corner = mouse + this. Zero until an edge refuses to let the box
-    /// follow the cursor; then it carries exactly how far behind it fell.
-    private var freeOffset: CGVector = .zero
+    /// Anchor, free corner, ⌘ move and ⌃ square — `RegionDrag`, shared with
+    /// Victor Addons' 🔦 glass spotlight so both gestures answer the same keys
+    /// the same way. A placeholder until `startDrag` gives it a screen.
+    private var drag = RegionDrag(anchor: .zero, within: .zero)
     private var dragging = false
     /// The driving button is up, told to us rather than read — see `endDrag`.
     private var released = false
@@ -279,18 +278,6 @@ public final class CropSelectionOverlay {
     /// not depend on the caller being alive.
     private let driven: Bool
     private var startScreen: NSScreen?
-    /// **⌃ held: the box is a square** (Victor, 2026-10-02) — see
-    /// `CropGeometry.squareCorner`. Read every tick, like ⌘.
-    private var squaring = false
-    /// ⌃ counts only once it has been seen *up* since the overlay opened.
-    /// Victor Addons puts this up on a held **⌃**P, and the crosshair appears
-    /// while that ⌃ is still down — a drag started before the finger leaves it
-    /// would otherwise come out square without anyone asking.
-    private var controlArmed = false
-    /// Set on the ⌘ press, cleared on the release: where the mouse and the box
-    /// were when the move began, so the translation is always measured from
-    /// there rather than accumulated.
-    private var moveOrigin: (mouse: NSPoint, anchor: NSPoint, free: NSPoint, box: NSRect)?
     /// **The box locked by ⇧, and how to give it back.** While ⇧ is held the
     /// first box stands still as the *source* and a second one is drawn from
     /// the pointer, corner to corner like the first (⌘ acts on it).
@@ -529,11 +516,12 @@ public final class CropSelectionOverlay {
             return
         }
 
-        guard let bounds = startScreen?.frame else { finish(nil); return }
+        guard startScreen != nil else { finish(nil); return }
         let flags = NSEvent.modifierFlags
-        let moving = flags.contains(.command)
-        if !flags.contains(.control) { controlArmed = true }
-        squaring = controlArmed && flags.contains(.control)
+        // ⌃ counts only once it has been seen *up* since the drag began (see
+        // `startDrag`): Victor Addons opens this on a held **⌃**P.
+        drag.readModifiers(command: flags.contains(.command), control: flags.contains(.control))
+        let moving = drag.moving
         // ⌥ does nothing here any more: the centred box it used to draw was
         // removed on 2026-09-26 (Victor).
 
@@ -542,10 +530,10 @@ public final class CropSelectionOverlay {
         let shifted = style.allowsMove && flags.contains(.shift)
         switch movePhase {
         case .none:
-            let box = currentRect(for: mouse)
+            let box = drag.rect(for: mouse)
             if shifted, held, box.width >= Self.minimumSide, box.height >= Self.minimumSide {
-                moveSource = (box: box, anchor: anchor, free: freeCorner(for: mouse))
-                moveOrigin = nil
+                moveSource = (box: box, anchor: drag.anchor, free: drag.freeCorner(for: mouse))
+                drag.dropMove()
                 movePhase = .pointing
             }
         case .pointing where !held:
@@ -556,11 +544,11 @@ public final class CropSelectionOverlay {
         case .pointing where !shifted:
             // ⇧ let go with the wheel still down: the box, back in the hand.
             if let source = moveSource {
-                anchor = source.anchor
-                freeOffset = CGVector(dx: source.free.x - mouse.x, dy: source.free.y - mouse.y)
+                drag.regrip(anchor: source.anchor, free: source.free, mouse: mouse)
+            } else {
+                drag.dropMove()
             }
             moveSource = nil
-            moveOrigin = nil
             movePhase = .none
         default:
             break
@@ -570,25 +558,12 @@ public final class CropSelectionOverlay {
             return
         }
 
-        if moving, moveOrigin == nil {
-            moveOrigin = (mouse: mouse, anchor: anchor, free: freeCorner(for: mouse),
-                          box: currentRect(for: mouse))
-        } else if !moving {
-            moveOrigin = nil
-        }
+        // ⌘ held: the box travels with the mouse instead of being resized —
+        // and stops at the edges of its own screen rather than walking off.
+        drag.follow(mouse)
 
-        if let origin = moveOrigin {
-            // ⌘ held: the box travels with the mouse instead of being resized —
-            // and stops at the edges of its own screen rather than walking off.
-            let raw = CGVector(dx: mouse.x - origin.mouse.x, dy: mouse.y - origin.mouse.y)
-            let delta = CropGeometry.clampedTranslation(of: origin.box, by: raw, within: bounds)
-            anchor = NSPoint(x: origin.anchor.x + delta.dx, y: origin.anchor.y + delta.dy)
-            freeOffset = CGVector(dx: origin.free.x + delta.dx - mouse.x,
-                                  dy: origin.free.y + delta.dy - mouse.y)
-        }
-
-        let rect = currentRect(for: mouse)
-        render(selection: rect, cursor: mouse, moving: moving, squaring: squaring, source: moveSource?.box)
+        let rect = drag.rect(for: mouse)
+        render(selection: rect, cursor: mouse, moving: moving, squaring: drag.squaring, source: moveSource?.box)
 
         guard !held else { return }
 
@@ -618,9 +593,8 @@ public final class CropSelectionOverlay {
             ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { finish(nil); return }
         startScreen = screen
-        anchor = CropGeometry.clamped(mouse, within: screen.frame)
-        freeOffset = .zero
-        moveOrigin = nil
+        // `controlArmed: false` — the ⌃ of ⌃P may still be down.
+        drag = RegionDrag(anchor: mouse, within: screen.frame, controlArmed: false)
         moveSource = nil
         movePhase = .none
         dragging = true
@@ -628,29 +602,13 @@ public final class CropSelectionOverlay {
 
     /// The destination's corner: the second press, with the source locked.
     private func startDestination(at point: NSPoint) {
-        guard let bounds = startScreen?.frame else { return }
+        guard startScreen != nil else { return }
         movePhase = .drawing
         released = false
-        anchor = CropGeometry.clamped(point, within: bounds)
-        freeOffset = .zero
-        moveOrigin = nil
+        drag.restart(at: point)
         pushed = point
         Self.onAwaitingDestination?(false)
         tick()
-    }
-
-    /// The box as it stands this tick: corner-to-corner from the anchor.
-    private func currentRect(for mouse: NSPoint) -> NSRect {
-        CropGeometry.rect(from: anchor, to: freeCorner(for: mouse))
-    }
-
-    /// The corner the mouse is dragging, held inside the starting screen —
-    /// and, while ⌃ is held, onto the square's diagonal from the anchor.
-    private func freeCorner(for mouse: NSPoint) -> NSPoint {
-        let raw = NSPoint(x: mouse.x + freeOffset.dx, y: mouse.y + freeOffset.dy)
-        guard let bounds = startScreen?.frame else { return raw }
-        let corner = CropGeometry.clamped(raw, within: bounds)
-        return squaring ? CropGeometry.squareCorner(from: anchor, toward: corner, within: bounds) : corner
     }
 
     // MARK: - Drawing
