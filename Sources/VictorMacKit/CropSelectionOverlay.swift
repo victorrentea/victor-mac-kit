@@ -201,6 +201,24 @@ public final class CropSelectionOverlay {
         overlay.startDestination(at: NSPoint(x: point.x, y: primary.frame.maxY - point.y))
     }
 
+    /// **A right click with the wheel still down: lock the box, as ⇧ would**
+    /// (2026-10-07, Victor: *"un singur click pe butonul din dreapta trebuie să
+    /// bage selecția în modul de drag"*). One click, not a held key, so the lock
+    /// is sticky from the first moment — letting go of nothing hands it back. A
+    /// second click before the wheel comes up does: the box returns to the hand,
+    /// the shape it was. The caller swallows the click, so the app underneath
+    /// never sees it and the right button's own *cancel* (read from session
+    /// state) never fires. Only while the first box is being dragged. Main.
+    public static func toggleMoveLock() {
+        guard let overlay = active, overlay.style.allowsMove, overlay.dragging else { return }
+        overlay.toggleMoveLock()
+    }
+
+    /// What the selection is doing, for a caller that shows it elsewhere (Walkie
+    /// Talkie's corner hint bar, 2026-10-07). Main thread; `.done` once, last.
+    public enum Phase { case selecting, locked, parked, drawing, done }
+    public static var onPhase: ((Phase) -> Void)?
+
     /// Take a parked selection down with nothing filed — the sentence it
     /// belonged to is over. A drag still under the hand is left alone. Main.
     public static func cancelIfParked() {
@@ -295,7 +313,11 @@ public final class CropSelectionOverlay {
     /// and the destination is being dragged; its release ships the move, or,
     /// too small to be a box, parks again.
     enum MovePhase { case none, pointing, parked, drawing }
-    private(set) var movePhase: MovePhase = .none
+    private(set) var movePhase: MovePhase = .none {
+        didSet { if movePhase != oldValue { reportPhase() } }
+    }
+    /// The box was locked by a right click, not by ⇧: ⇧ being up says nothing.
+    private var lockedByClick = false
     private var finished = false
     /// The real pointer is hidden for the whole crop — the guides and the box
     /// already say where it is, and the arrow on top of the pixels being
@@ -365,6 +387,7 @@ public final class CropSelectionOverlay {
         // moving, and waiting for a press that has *already happened* would sit
         // there dimming the screen until he pressed the wheel a second time.
         if let anchor { startDrag(at: anchor) }
+        reportPhase()
 
         let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(timer, forMode: .common)
@@ -382,6 +405,7 @@ public final class CropSelectionOverlay {
             seconds, ticks, pushes, ticks - pushes, worstGap * 1000))
         timer?.invalidate()
         timer = nil
+        Self.onPhase?(.done)
         Self.stopEscapeTapSoon()
         for entry in panels { entry.panel.orderOut(nil) }
         // Hide/show are counted: exactly one release, or someone else's hide
@@ -541,7 +565,7 @@ public final class CropSelectionOverlay {
             movePhase = .parked
             pushed = nil      // nothing is swallowed now; the pointer is polled
             Self.onAwaitingDestination?(true)
-        case .pointing where !shifted:
+        case .pointing where !shifted && !lockedByClick:
             // ⇧ let go with the wheel still down: the box, back in the hand.
             if let source = moveSource {
                 drag.regrip(anchor: source.anchor, free: source.free, mouse: mouse)
@@ -588,6 +612,41 @@ public final class CropSelectionOverlay {
         finish(Selection(rect: drawn, screen: screen))
     }
 
+    private func reportPhase() {
+        guard !finished else { return }
+        switch movePhase {
+        case .none: Self.onPhase?(.selecting)
+        case .pointing: Self.onPhase?(.locked)
+        case .parked: Self.onPhase?(.parked)
+        case .drawing: Self.onPhase?(.drawing)
+        }
+    }
+
+    private func toggleMoveLock() {
+        let mouse = pushed ?? NSEvent.mouseLocation
+        switch movePhase {
+        case .none:
+            let box = drag.rect(for: mouse)
+            guard box.width >= Self.minimumSide, box.height >= Self.minimumSide else { return }
+            moveSource = (box: box, anchor: drag.anchor, free: drag.freeCorner(for: mouse))
+            drag.dropMove()
+            lockedByClick = true
+            movePhase = .pointing
+        case .pointing:
+            if let source = moveSource {
+                drag.regrip(anchor: source.anchor, free: source.free, mouse: mouse)
+            } else {
+                drag.dropMove()
+            }
+            moveSource = nil
+            lockedByClick = false
+            movePhase = .none
+        default:
+            return
+        }
+        tick()
+    }
+
     private func startDrag(at mouse: NSPoint) {
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
             ?? NSScreen.main ?? NSScreen.screens.first
@@ -596,6 +655,7 @@ public final class CropSelectionOverlay {
         // `controlArmed: false` — the ⌃ of ⌃P may still be down.
         drag = RegionDrag(anchor: mouse, within: screen.frame, controlArmed: false)
         moveSource = nil
+        lockedByClick = false
         movePhase = .none
         dragging = true
     }
