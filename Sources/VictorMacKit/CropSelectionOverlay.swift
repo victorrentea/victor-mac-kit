@@ -89,6 +89,14 @@ public struct CropSelectionStyle {
     /// Beside the pointer while the source is locked and the destination not
     /// yet drawn — the one moment nothing else on screen says what to do.
     public var moveHint: String
+    /// **The move in three colours** (2026-10-15, Walkie Talkie; Victor: *"circle
+    /// what I selected first in red, and the new selection in green, from red to
+    /// green. And the arrow in between, white"*). The locked source box, the
+    /// destination being drawn, and the arrow between them; nil keeps the accent,
+    /// so an app that never asked keeps one colour.
+    public var moveSourceColor: NSColor?
+    public var moveDestinationColor: NSColor?
+    public var moveArrowColor: NSColor?
 
     public init(accent: NSColor = .systemYellow,
                 hint: String = "",
@@ -97,7 +105,10 @@ public struct CropSelectionStyle {
                 centeredSuffix: String = "",
                 allowsMove: Bool = false,
                 moveToSuffix: String = "⇧ move to",
-                moveHint: String = "wheel-drag where it goes") {
+                moveHint: String = "wheel-drag where it goes",
+                moveSourceColor: NSColor? = nil,
+                moveDestinationColor: NSColor? = nil,
+                moveArrowColor: NSColor? = nil) {
         self.accent = accent
         self.hint = hint
         self.movingSuffix = movingSuffix
@@ -106,6 +117,9 @@ public struct CropSelectionStyle {
         self.allowsMove = allowsMove
         self.moveToSuffix = moveToSuffix
         self.moveHint = moveHint
+        self.moveSourceColor = moveSourceColor
+        self.moveDestinationColor = moveDestinationColor
+        self.moveArrowColor = moveArrowColor
     }
 }
 
@@ -224,6 +238,34 @@ public final class CropSelectionOverlay {
     public static func cancelIfParked() {
         guard let overlay = active, overlay.movePhase == .parked else { return }
         overlay.finish(nil)
+    }
+
+    /// **A picture of the overlay in a given state, without putting it up** —
+    /// for a caller's tests and docs (2026-10-15: the move's red → green with
+    /// a white arrow had no way to be seen other than making the gesture).
+    /// `selection` and `source` are in the picture's own points, origin
+    /// bottom-left. Main.
+    public static func snapshot(size: NSSize, style: CropSelectionStyle, selection: NSRect?,
+                                source: NSRect? = nil, cursor: NSPoint) -> NSImage? {
+        let view = CropOverlayView(frame: NSRect(origin: .zero, size: size), scale: 1, style: style)
+        view.render(selection: selection, cursor: cursor, size: selection?.size, moving: false,
+                    source: source, pointing: source != nil)
+        guard let layer = view.layer,
+              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width),
+                                         pixelsHigh: Int(size.height), bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: rep)
+        else { return nil }
+        layer.frame = view.bounds
+        layer.layoutIfNeeded()
+        // Under the dimming, a white page, so the overlay reads as it does on a screen.
+        context.cgContext.setFillColor(NSColor.white.cgColor)
+        context.cgContext.fill(CGRect(origin: .zero, size: size))
+        layer.render(in: context.cgContext)
+        let image = NSImage(size: size)
+        image.addRepresentation(rep)
+        return image
     }
 
     /// Must be called on the main thread.
@@ -758,14 +800,14 @@ private final class CropOverlayView: NSView {
         root.addSublayer(border)
 
         sourceBorder.fillColor = nil
-        sourceBorder.strokeColor = style.accent.cgColor
-        sourceBorder.lineWidth = 2
+        sourceBorder.strokeColor = (style.moveSourceColor ?? style.accent).cgColor
+        sourceBorder.lineWidth = style.moveSourceColor == nil ? 2 : 3
         sourceBorder.lineDashPattern = [6, 4]
         sourceBorder.isHidden = true
         root.addSublayer(sourceBorder)
 
-        arrow.fillColor = style.accent.cgColor
-        arrow.strokeColor = style.accent.cgColor
+        arrow.fillColor = (style.moveArrowColor ?? style.accent).cgColor
+        arrow.strokeColor = (style.moveArrowColor ?? style.accent).cgColor
         arrow.lineWidth = 3
         arrow.lineCap = .round
         arrow.lineJoin = .round
@@ -838,6 +880,9 @@ private final class CropOverlayView: NSView {
             border.isHidden = false
             border.path = CGPath(rect: selection.insetBy(dx: -1, dy: -1), transform: nil)
             border.lineWidth = moving ? 3 : 2
+            // The destination of a move wears its own colour; any other box, the accent.
+            border.strokeColor = (source != nil ? style.moveDestinationColor ?? style.accent : style.accent).cgColor
+            if source != nil, style.moveDestinationColor != nil { border.lineWidth = 3 }
             vGuide.isHidden = true
             hGuide.isHidden = true
             hint.layer.isHidden = true
