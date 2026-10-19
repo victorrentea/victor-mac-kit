@@ -758,7 +758,74 @@ public final class CropSelectionOverlay {
         let to = CropGeometry.rounded(ghostRect(of: source.box, at: NSEvent.mouseLocation))
         Self.log?("✂️ left click while parked — dropped at \(Int(to.minX)),\(Int(to.minY)) \(Int(to.width))×\(Int(to.height))"
                   + (ghostImage == nil ? " (no ghost had landed)" : ""))
+        Self.burnIn(ghostImage, at: to)
         finish(Selection(rect: CropGeometry.rounded(source.box), screen: screen, movedTo: to))
+    }
+
+    /// **The drop burns in, then goes** (2026-10-19, Victor: *"once I drop the
+    /// image I carried … it should somehow feel like burning in … an effect that
+    /// demonstrates that it's gonna move there and then vanish afterwards"*).
+    /// The ghost stamps down from 50 % to full with a small thud, glows
+    /// orange-hot and cools, then fades out — about 0.9 s, in a window of its
+    /// own that captures cannot see (`sharingType = .none`), so the clean frame
+    /// taken 0.1 s after the overlay leaves never has it in.
+    private static var burning: [NSPanel] = []
+    private static func burnIn(_ image: CGImage?, at rect: NSRect) {
+        let pad: CGFloat = 24
+        let panel = NSPanel(contentRect: rect.insetBy(dx: -pad, dy: -pad),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.ignoresMouseEvents = true
+        panel.sharingType = .none
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)))
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        let view = NSView(frame: NSRect(origin: .zero, size: panel.frame.size))
+        view.wantsLayer = true
+        panel.contentView = view
+        guard let root = view.layer else { return }
+
+        let piece = CALayer()
+        piece.frame = CGRect(x: pad, y: pad, width: rect.width, height: rect.height)
+        piece.contents = image
+        piece.contentsGravity = .resize
+        piece.borderColor = NSColor.systemOrange.cgColor
+        piece.borderWidth = 3
+        piece.shadowColor = NSColor.systemOrange.cgColor
+        piece.shadowRadius = 14
+        piece.shadowOffset = .zero
+        piece.shadowOpacity = 0
+        piece.opacity = 0
+        root.addSublayer(piece)
+        // The heat: an orange wash over the pixels that cools to nothing.
+        let heat = CALayer()
+        heat.frame = piece.bounds
+        heat.backgroundColor = NSColor.systemOrange.cgColor
+        heat.opacity = 0
+        piece.addSublayer(heat)
+
+        panel.orderFrontRegardless()
+        burning.append(panel)
+
+        func keyframes(_ path: String, _ values: [Any], _ times: [NSNumber]) -> CAKeyframeAnimation {
+            let a = CAKeyframeAnimation(keyPath: path)
+            a.values = values
+            a.keyTimes = times
+            a.duration = 0.9
+            a.calculationMode = .linear
+            return a
+        }
+        // 0 → 0.18 s the stamp, → 0.5 s the cooling, → 0.9 s gone.
+        piece.add(keyframes("opacity", [0.5, 1, 1, 0], [0, 0.2, 0.55, 1]), forKey: "opacity")
+        piece.add(keyframes("transform.scale", [1.08, 0.98, 1, 1], [0, 0.2, 0.3, 1]), forKey: "scale")
+        piece.add(keyframes("shadowOpacity", [0, 1, 0.3, 0], [0, 0.2, 0.55, 1]), forKey: "glow")
+        piece.add(keyframes("borderWidth", [6, 3, 1, 0], [0, 0.2, 0.55, 1]), forKey: "edge")
+        heat.add(keyframes("opacity", [0.55, 0.35, 0, 0], [0, 0.2, 0.55, 1]), forKey: "heat")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.95) {
+            panel.orderOut(nil)
+            burning.removeAll { $0 === panel }
+        }
     }
 
     /// The source box's pixels, without our own dimming: ScreenCaptureKit with
