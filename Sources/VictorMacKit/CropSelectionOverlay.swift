@@ -1,5 +1,6 @@
 import AppKit
 import QuartzCore
+import ScreenCaptureKit
 
 /// The selection UI for a screen region — ours, in place of `screencapture -i`.
 ///
@@ -105,7 +106,7 @@ public struct CropSelectionStyle {
                 centeredSuffix: String = "",
                 allowsMove: Bool = false,
                 moveToSuffix: String = "⇧ move to",
-                moveHint: String = "wheel-drag where it goes",
+                moveHint: String = "click to drop it here  ·  or wheel-drag where it goes",
                 moveSourceColor: NSColor? = nil,
                 moveDestinationColor: NSColor? = nil,
                 moveArrowColor: NSColor? = nil) {
@@ -245,11 +246,13 @@ public final class CropSelectionOverlay {
     /// a white arrow had no way to be seen other than making the gesture).
     /// `selection` and `source` are in the picture's own points, origin
     /// bottom-left. Main.
+    /// `ghost` is the parked box's pixels riding the pointer (2026-10-19).
     public static func snapshot(size: NSSize, style: CropSelectionStyle, selection: NSRect?,
-                                source: NSRect? = nil, cursor: NSPoint) -> NSImage? {
+                                source: NSRect? = nil, cursor: NSPoint,
+                                ghost: (rect: NSRect, image: CGImage)? = nil) -> NSImage? {
         let view = CropOverlayView(frame: NSRect(origin: .zero, size: size), scale: 1, style: style)
         view.render(selection: selection, cursor: cursor, size: selection?.size, moving: false,
-                    source: source, pointing: source != nil)
+                    source: source, pointing: source != nil, ghost: ghost?.rect, ghostImage: ghost?.image)
         guard let layer = view.layer,
               let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width),
                                          pixelsHigh: Int(size.height), bitsPerSample: 8,
@@ -360,6 +363,15 @@ public final class CropSelectionOverlay {
     }
     /// The box was locked by a right click, not by ⇧: ⇧ being up says nothing.
     private var lockedByClick = false
+    /// **The locked box's pixels, riding the pointer at half opacity**
+    /// (2026-10-19, Walkie Talkie; Victor: *"the selected part of the screen
+    /// that I'm moving should be displayed fifty percent transparent over the
+    /// screen. So if I just click somewhere with left click, it's dropped over
+    /// there"*). Grabbed once at the lock (`captureGhost`), nil until it lands.
+    private var ghostImage: CGImage?
+    /// The pointer minus the source box's origin at the lock: the ghost keeps
+    /// the hand where it took hold of the box.
+    private var grab = CGVector(dx: 0, dy: 0)
     private var finished = false
     /// The real pointer is hidden for the whole crop — the guides and the box
     /// already say where it is, and the arrow on top of the pixels being
@@ -419,6 +431,7 @@ public final class CropSelectionOverlay {
             let view = CropOverlayView(frame: NSRect(origin: .zero, size: screen.frame.size),
                                        scale: screen.backingScaleFactor,
                                        style: style)
+            view.onLeftDown = { [weak self] in self?.leftClicked() }
             panel.contentView = view
             panel.setFrame(screen.frame, display: true)
             panel.orderFrontRegardless()
@@ -600,6 +613,7 @@ public final class CropSelectionOverlay {
             if shifted, held, box.width >= Self.minimumSide, box.height >= Self.minimumSide {
                 moveSource = (box: box, anchor: drag.anchor, free: drag.freeCorner(for: mouse))
                 drag.dropMove()
+                lift(box, at: mouse)
                 movePhase = .pointing
             }
         case .pointing where !held:
@@ -620,7 +634,8 @@ public final class CropSelectionOverlay {
             break
         }
         if movePhase == .pointing || movePhase == .parked {
-            render(selection: nil, cursor: mouse, moving: false, source: moveSource?.box, pointing: true)
+            render(selection: nil, cursor: mouse, moving: false, source: moveSource?.box, pointing: true,
+                   ghost: moveSource.map { ghostRect(of: $0.box, at: mouse) })
             return
         }
 
@@ -646,7 +661,8 @@ public final class CropSelectionOverlay {
                 movePhase = .parked
                 pushed = nil
                 Self.onAwaitingDestination?(true)
-                render(selection: nil, cursor: mouse, moving: false, source: moveSource?.box, pointing: true)
+                render(selection: nil, cursor: mouse, moving: false, source: moveSource?.box, pointing: true,
+                       ghost: moveSource.map { ghostRect(of: $0.box, at: mouse) })
             }
             return
         }
@@ -672,6 +688,7 @@ public final class CropSelectionOverlay {
             guard box.width >= Self.minimumSide, box.height >= Self.minimumSide else { return }
             moveSource = (box: box, anchor: drag.anchor, free: drag.freeCorner(for: mouse))
             drag.dropMove()
+            lift(box, at: mouse)
             lockedByClick = true
             movePhase = .pointing
         case .pointing:
@@ -713,10 +730,86 @@ public final class CropSelectionOverlay {
         tick()
     }
 
+    /// The box just locked: remember where the hand holds it, and fetch its
+    /// pixels for the ghost.
+    private func lift(_ box: NSRect, at mouse: NSPoint) {
+        grab = CGVector(dx: mouse.x - box.minX, dy: mouse.y - box.minY)
+        ghostImage = nil
+        captureGhost(of: box)
+    }
+
+    /// Where the ghost is with the pointer at `mouse` — the box's size, held
+    /// at `grab`, kept on the screen it was cut from.
+    private func ghostRect(of box: NSRect, at mouse: NSPoint) -> NSRect {
+        var rect = NSRect(x: mouse.x - grab.dx, y: mouse.y - grab.dy, width: box.width, height: box.height)
+        if let frame = startScreen?.frame {
+            rect.origin.x = min(max(rect.minX, frame.minX), frame.maxX - rect.width)
+            rect.origin.y = min(max(rect.minY, frame.minY), frame.maxY - rect.height)
+        }
+        return rect
+    }
+
+    /// **A left click while parked drops the ghost where it is** (2026-10-19):
+    /// the move ships with the ghost's rectangle as its destination, the same
+    /// `Selection.movedTo` a wheel-drawn box gives. Anywhere else a left click
+    /// lands on the panel and does nothing, as it always did.
+    private func leftClicked() {
+        guard movePhase == .parked, let source = moveSource, let screen = startScreen else { return }
+        let to = CropGeometry.rounded(ghostRect(of: source.box, at: NSEvent.mouseLocation))
+        Self.log?("✂️ left click while parked — dropped at \(Int(to.minX)),\(Int(to.minY)) \(Int(to.width))×\(Int(to.height))"
+                  + (ghostImage == nil ? " (no ghost had landed)" : ""))
+        finish(Selection(rect: CropGeometry.rounded(source.box), screen: screen, movedTo: to))
+    }
+
+    /// The source box's pixels, without our own dimming: ScreenCaptureKit with
+    /// this app's windows excluded (`CGWindowListCreateImage`'s *below this
+    /// window* is obsolete on macOS 15). Lands a beat after the lock; until then
+    /// there is no ghost, only the arrow. Nothing before macOS 14.
+    private func captureGhost(of box: NSRect) {
+        guard #available(macOS 14.0, *), let screen = startScreen else { return }
+        let asked = Date()
+        Task { @MainActor [weak self] in
+            let image = await Self.grab(box, on: screen)
+            if let image {
+                Self.log?(String(format: "✂️ ghost %d×%d px in %.0f ms", image.width, image.height,
+                                 Date().timeIntervalSince(asked) * 1000))
+            }
+            guard let self, !self.finished, self.moveSource?.box == box else { return }
+            self.ghostImage = image
+            self.tick()
+        }
+    }
+
+    @available(macOS 14.0, *)
+    private static func grab(_ box: NSRect, on screen: NSScreen) async -> CGImage? {
+        let key = NSDeviceDescriptionKey("NSScreenNumber")
+        guard let id = (screen.deviceDescription[key] as? NSNumber)?.uint32Value else { return nil }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard let display = content.displays.first(where: { $0.displayID == id }) else { return nil }
+            let me = ProcessInfo.processInfo.processIdentifier
+            let filter = SCContentFilter(display: display,
+                                         excludingApplications: content.applications.filter { $0.processID == me },
+                                         exceptingWindows: [])
+            let config = SCStreamConfiguration()
+            let frame = screen.frame
+            // Display points, origin top-left.
+            config.sourceRect = CGRect(x: box.minX - frame.minX, y: frame.maxY - box.maxY,
+                                       width: box.width, height: box.height)
+            config.width = Int((box.width * screen.backingScaleFactor).rounded())
+            config.height = Int((box.height * screen.backingScaleFactor).rounded())
+            config.showsCursor = false
+            return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        } catch {
+            log?("✂️ the moved box's ghost could not be captured — \(error.localizedDescription)")
+            return nil
+        }
+    }
+
     // MARK: - Drawing
 
     private func render(selection: NSRect?, cursor: NSPoint, moving: Bool, squaring: Bool = false,
-                        source: NSRect? = nil, pointing: Bool = false) {
+                        source: NSRect? = nil, pointing: Bool = false, ghost: NSRect? = nil) {
         for entry in panels {
             let origin = entry.screen.frame.origin
             let toLocal = { (r: NSRect) in NSRect(x: r.minX - origin.x, y: r.minY - origin.y,
@@ -727,7 +820,9 @@ public final class CropSelectionOverlay {
                               moving: moving,
                               squaring: squaring,
                               source: source.map(toLocal),
-                              pointing: pointing)
+                              pointing: pointing,
+                              ghost: ghost.map(toLocal),
+                              ghostImage: ghostImage)
         }
     }
 }
@@ -757,6 +852,10 @@ private final class CropOverlayView: NSView {
     /// destination's.
     private let sourceBorder = CAShapeLayer()
     private let arrow = CAShapeLayer()
+    /// The locked box's pixels at half opacity, under the pointer.
+    private let ghost = CALayer()
+    /// A left press on the panel — the overlay decides whether it means anything.
+    var onLeftDown: (() -> Void)?
     private let vGuide = CALayer()
     private let hGuide = CALayer()
     private let sizeLabel: PillLabel
@@ -799,6 +898,11 @@ private final class CropOverlayView: NSView {
         border.lineWidth = 2
         root.addSublayer(border)
 
+        ghost.opacity = 0.5
+        ghost.contentsGravity = .resize
+        ghost.isHidden = true
+        root.addSublayer(ghost)
+
         sourceBorder.fillColor = nil
         sourceBorder.strokeColor = (style.moveSourceColor ?? style.accent).cgColor
         sourceBorder.lineWidth = style.moveSourceColor == nil ? 2 : 3
@@ -839,7 +943,7 @@ private final class CropOverlayView: NSView {
     /// The panel accepts clicks purely so the app underneath never sees the
     /// drag; the selection itself is read from session input state.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func mouseDown(with event: NSEvent) {}
+    override func mouseDown(with event: NSEvent) { onLeftDown?() }
     override func mouseDragged(with event: NSEvent) {}
     override func mouseUp(with event: NSEvent) {}
     override func rightMouseDown(with event: NSEvent) {}
@@ -847,7 +951,8 @@ private final class CropOverlayView: NSView {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
 
     func render(selection: NSRect?, cursor: NSPoint, size: CGSize?, moving: Bool, squaring: Bool = false,
-                source: NSRect? = nil, pointing: Bool = false) {
+                source: NSRect? = nil, pointing: Bool = false, ghost ghostRect: NSRect? = nil,
+                ghostImage: CGImage? = nil) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
@@ -864,8 +969,9 @@ private final class CropOverlayView: NSView {
             sourceBorder.isHidden = false
             sourceBorder.path = CGPath(rect: source.insetBy(dx: -1, dy: -1), transform: nil)
             // The arrow's tip: the destination's centre once there is one, the
-            // pointer while it is still being aimed.
-            if let tip = selection.map({ CGPoint(x: $0.midX, y: $0.midY) }) ?? (pointing ? cursor : nil) {
+            // ghost's while it rides the pointer, the pointer otherwise.
+            let aimed = ghostRect.map { CGPoint(x: $0.midX, y: $0.midY) } ?? cursor
+            if let tip = selection.map({ CGPoint(x: $0.midX, y: $0.midY) }) ?? (pointing ? aimed : nil) {
                 arrow.isHidden = false
                 arrow.path = Self.arrowPath(from: CGPoint(x: source.midX, y: source.midY), to: tip)
             } else {
@@ -874,6 +980,15 @@ private final class CropOverlayView: NSView {
         } else {
             sourceBorder.isHidden = true
             arrow.isHidden = true
+        }
+
+        if let ghostRect, let ghostImage {
+            ghost.isHidden = false
+            ghost.contents = ghostImage
+            ghost.frame = ghostRect
+        } else {
+            ghost.isHidden = true
+            ghost.contents = nil
         }
 
         if let selection, let size {
