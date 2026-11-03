@@ -513,6 +513,19 @@ public final class CropSelectionOverlay {
     private static var escapeHeld = false
     private static let escKeyCode: Int64 = 53
 
+    /// **An Esc the caller posted itself is not Victor's** (2026-11-03). Set to
+    /// the `eventSourceUserData` the caller stamps its own events with, and an
+    /// Esc carrying it goes through untouched and ends nothing. Walkie Talkie
+    /// posts ⌃Escape to Wispr Flow 3 s into a sentence whose microphone never
+    /// opened — exactly when a box is being framed: 8 crops of 8 died on it, and
+    /// the tap ate the ⌃Escape, so Wispr's row stayed open as well.
+    public static var ownEventStamp: Int64?
+
+    static func isCallersOwn(_ event: CGEvent) -> Bool {
+        guard let ownEventStamp else { return false }
+        return event.getIntegerValueField(.eventSourceUserData) == ownEventStamp
+    }
+
     private static func startEscapeTap() {
         stopEscapeTap()
         let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
@@ -531,12 +544,16 @@ public final class CropSelectionOverlay {
         escapeTapSource = source
     }
 
-    private static func handleEscapeTap(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+    static func handleEscapeTap(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let escapeTap { CGEvent.tapEnable(tap: escapeTap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
         guard event.getIntegerValueField(.keyboardEventKeycode) == escKeyCode else {
+            return Unmanaged.passUnretained(event)
+        }
+        if isCallersOwn(event) {
+            if type == .keyDown { log?("✂️ the caller's own Esc went past the crop — it stays up") }
             return Unmanaged.passUnretained(event)
         }
         if type == .keyDown {
@@ -557,6 +574,8 @@ public final class CropSelectionOverlay {
             if active == nil || active?.finished == true { stopEscapeTap() }
         }
     }
+
+    static func cancelForTesting() { active?.finish(nil) }
 
     private static func stopEscapeTap() {
         escapeHeld = false
@@ -580,7 +599,9 @@ public final class CropSelectionOverlay {
         // no caller asks for that, and it is the escape hatch that works even if
         // the caller driving the button has stopped answering.
         let rightDown = CGEventSource.buttonState(.combinedSessionState, button: .right)
-        let escape = CGEventSource.keyState(.combinedSessionState, key: 53)
+        // Only without the tap: with it, Esc has been judged already, and session
+        // state cannot tell a press of his from one the caller posted.
+        let escape = Self.escapeTap == nil && CGEventSource.keyState(.combinedSessionState, key: 53)
 
         // Esc and right-click both mean "never mind": no file, clipboard and
         // folder left exactly as they were.
