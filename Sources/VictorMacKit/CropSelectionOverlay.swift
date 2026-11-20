@@ -4,7 +4,7 @@ import ScreenCaptureKit
 
 /// The selection UI for a screen region — ours, in place of `screencapture -i`.
 ///
-/// **Two apps drive it, and they drive it differently.** Victor Addons puts it
+/// **Two apps drive it, and they drive it differently.** Victor Mac puts it
 /// up on ⌃P **held** and waits for a left-button drag; Walkie Talkie has one
 /// under way already — the wheel is down and the hand is moving — so it hands
 /// the anchor in and the box is live from the first frame. `begin(button:from:)`
@@ -312,7 +312,7 @@ public final class CropSelectionOverlay {
     private var timer: Timer?
 
     /// Anchor, free corner, ⌘ move and ⌃ square — `RegionDrag`, shared with
-    /// Victor Addons' 🔦 glass spotlight so both gestures answer the same keys
+    /// Victor Mac' 🔦 glass spotlight so both gestures answer the same keys
     /// the same way. A placeholder until `startDrag` gives it a screen.
     private var drag = RegionDrag(anchor: .zero, within: .zero)
     private var dragging = false
@@ -619,7 +619,7 @@ public final class CropSelectionOverlay {
         guard startScreen != nil else { finish(nil); return }
         let flags = NSEvent.modifierFlags
         // ⌃ counts only once it has been seen *up* since the drag began (see
-        // `startDrag`): Victor Addons opens this on a held **⌃**P.
+        // `startDrag`): Victor Mac opens this on a held **⌃**P.
         drag.readModifiers(command: flags.contains(.command), control: flags.contains(.control))
         let moving = drag.moving
         // ⌥ does nothing here any more: the centred box it used to draw was

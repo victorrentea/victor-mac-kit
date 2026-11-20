@@ -6,7 +6,7 @@ import Foundation
 ///
 /// Every decision here is arithmetic, so it is decided here and unit-tested
 /// here — the overlay above it only has to draw what this says. Same bargain as
-/// `HeartbeatBump` and `HeartbeatDogFollow` in Victor Addons.
+/// `HeartbeatBump` and `HeartbeatDogFollow` in Victor Mac.
 ///
 /// All rectangles are in **global Cocoa** coordinates (y up), the space
 /// `NSEvent.mouseLocation` and `NSScreen.frame` already speak; the flip into

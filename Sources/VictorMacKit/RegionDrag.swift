@@ -4,7 +4,7 @@ import CoreGraphics
 /// box, ⌃ holding it square, all of it kept on the screen it started on.
 ///
 /// Extracted from `CropSelectionOverlay` on 2026-10-04 when the 🔦 glass
-/// spotlight in Victor Addons (⇧ + wheel-drag) needed the same gesture. Victor:
+/// spotlight in Victor Mac (⇧ + wheel-drag) needed the same gesture. Victor:
 /// *"copiază-ți controalele din modul în care tai crop … behavior-ul efectiv
 /// trebuie tot același"*. Two overlays, one set of keys, one implementation —
 /// the drawing is each overlay's own business, this is not.
@@ -26,7 +26,7 @@ public struct RegionDrag {
     /// ⌃ is held (and armed): the box is a square — `CropGeometry.squareCorner`.
     public private(set) var squaring = false
     /// ⌃ counts only once it has been seen *up* since the gesture opened, for a
-    /// caller whose own trigger holds ⌃ (Victor Addons' ⌃P crop). Pass `true`
+    /// caller whose own trigger holds ⌃ (Victor Mac' ⌃P crop). Pass `true`
     /// when the trigger has nothing to do with ⌃.
     private var controlArmed: Bool
     /// Set on the ⌘ press, cleared on the release: where the mouse and the box

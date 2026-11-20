@@ -1,6 +1,6 @@
 # victor-mac-kit
 
-The pieces **Victor Addons** and **Walkie Talkie** both need, kept in one place
+The pieces **Victor Mac** and **Walkie Talkie** both need, kept in one place
 so the gesture is literally the same code in both rather than approximately the
 same code in two.
 
@@ -9,7 +9,7 @@ Today that is one gesture: **dragging out a region of the screen**.
 | file | what it is |
 |---|---|
 | `CropGeometry` | the arithmetic — the box from two corners, ⌥ from the middle, ⌘ moving it, held inside its screen, and the flip into image pixels. Decided here, unit-tested here. |
-| `RegionDrag` | the hand's half of the drag — anchor, free corner, ⌘ moving the box, ⌃ holding it square — as a value fed one tick at a time. Also drives Victor Addons' 🔦 glass spotlight (⇧ + wheel-drag), so that gesture answers the crop's keys by running the crop's code. |
+| `RegionDrag` | the hand's half of the drag — anchor, free corner, ⌘ moving the box, ⌃ holding it square — as a value fed one tick at a time. Also drives Victor Mac' 🔦 glass spotlight (⇧ + wheel-drag), so that gesture answers the crop's keys by running the crop's code. |
 | `CropSelectionOverlay` | the dimming, the rectangle, the size readout. One panel per screen, driven by a 60 Hz poll of session input state rather than by AppKit events, so it needs no key window and steals no focus from the room. |
 | `CropCapture` | the chosen rectangle → a JPEG, by capturing the whole display and cropping at the display's real pixel scale. |
 
@@ -25,12 +25,12 @@ readout instead.
 ## Why the two apps disagree about so little
 
 `CropSelectionStyle` is the whole surface of it: the accent colour and three
-strings. Victor Addons speaks Romanian on screen; Walkie Talkie's overlay is
+strings. Victor Mac speaks Romanian on screen; Walkie Talkie's overlay is
 English-only, because its chip is on a projector in front of an international
 room. Nothing else is per-app.
 
 `begin(button:from:)` is the other difference and it is about *how the gesture
-starts* — and about who owns the button. Victor Addons holds ⌃P, lets go, and then draws a box with the left
+starts* — and about who owns the button. Victor Mac holds ⌃P, lets go, and then draws a box with the left
 button. Walkie Talkie has a drag under way already — the wheel is down and the
 hand is moving — so it hands in the corner it started from and the box is live
 on the first frame.
