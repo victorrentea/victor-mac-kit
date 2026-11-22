@@ -98,6 +98,14 @@ public struct CropSelectionStyle {
     public var moveSourceColor: NSColor?
     public var moveDestinationColor: NSColor?
     public var moveArrowColor: NSColor?
+    /// **Every text and number off the overlay** (2026-11-22, for Walkie Talkie's teaser —
+    /// a first-time viewer read the legends as noise, and a mask in the edit looked bad):
+    /// the legend pill under the box (`⌘ move  ⌃↘ square  ⇧ move to`), the width and height
+    /// on its sides, the hint beside the pointer (`click to drop it here …`) and the four
+    /// distances on the crosshair. The dimming, the box, the dashed source, the ghost, the
+    /// arrow and the crosshair's lines and arrowheads stay. False unless the host sets it,
+    /// so an app that never asked keeps every readout.
+    public var readoutsHidden = false
 
     public init(accent: NSColor = .systemYellow,
                 hint: String = "",
@@ -1120,6 +1128,10 @@ private final class CropOverlayView: NSView {
                         attributes: [.font: Self.hintFont, .foregroundColor: NSColor.white]),
                       near: nil, cursor: cursor)
             }
+        }
+        // Last, so no branch above can bring one back.
+        if style.readoutsHidden {
+            for pill in [sizeLabel, hint, widthLabel, heightLabel] + edgeLabels { pill.layer.isHidden = true }
         }
     }
 
